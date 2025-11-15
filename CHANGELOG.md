@@ -1,3 +1,45 @@
+## 1.0.2
+
+- Fix pana analysis issues
+- Fix Web support for StreamableHTTP client
+
+## 1.0.1
+
+- Fix Documentation links in README.md
+
+## 1.0.0
+
+- Update protocol version to 2025-06-18
+- Add Elicitation support (server-initiated input collection)
+  - API: `McpServer.elicitUserInput()` (server) | `Client.onElicitRequest` (client handler)
+  - Types: ElicitRequestParams (`message`, `requestedSchema`), ElicitResult (`action`, `content`), ClientCapabilitiesElicitation
+  - Uses `elicitation/create` method (Inspector-compatible)
+  - Accepts JSON Schema Maps for flexible schema definition
+  - Helpers: `.accepted`, `.declined`, `.cancelled` getters on ElicitResult
+  - Example: elicitation_http_server.dart
+  - Tests: elicitation_test.dart
+- **CRITICAL FIX**: Logger → stderr (prevents JSON-RPC corruption in stdio)
+- **Comprehensive Test Coverage**: Added 203 new tests across 4 phases (+13.1% overall coverage: 56.9% → 70.0%)
+  - Phase 1: External API coverage (Server MCP, URI templates, Client/Server capabilities) - 108 tests
+  - Phase 2: Transport coverage (Stdio, SSE, HTTPS) - 38 tests
+  - Phase 3: Types & edge cases (Protocol lifecycle, error handling) - 45 tests
+  - Phase 4: Advanced scenarios (Protocol timeouts/aborts, Streamable HTTPS integration) - 12 tests
+  - Fixed critical URI template variable duplication bug
+  - Fixed McpError code preservation in request handlers
+  - All 351 tests passing ✅
+
+## 0.7.0
+
+- Add support for Completions capability per MCP 2025-06-18 spec
+- Add ServerCapabilitiesCompletions class for explicit completions capability declaration
+- Update ServerCapabilities to include completions field
+- Update client capability check to use explicit completions capability instead of inferring from prompts/resources
+- Add integration tests and example for completions capability usage
+
+## 0.6.4
+
+- Fix issue with StreamableHTTP server not setting correct content-type for SSE
+
 ## 0.6.3
 
 - Replace print statements with lightweight logging implementation

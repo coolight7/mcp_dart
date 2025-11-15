@@ -1,3 +1,5 @@
+import 'logging_io.dart' if (dart.library.js_interop) 'logging_web.dart';
+
 enum LogLevel { debug, info, warn, error }
 
 typedef LogHandler = void Function(
@@ -21,7 +23,7 @@ final class Logger {
     LogLevel level,
     String message,
   ) {
-    print("[${level.name.toUpperCase()}][$loggerName] $message");
+    writeLog("[${level.name.toUpperCase()}][$loggerName] $message");
   }
 
   void log(LogLevel level, String message) {
