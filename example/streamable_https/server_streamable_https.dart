@@ -26,7 +26,7 @@ class InMemoryEventStore implements EventStore {
   Future<StreamId> replayEventsAfter(
     EventId lastEventId, {
     required Future<void> Function(EventId eventId, JsonRpcMessage message)
-        send,
+    send,
   }) async {
     // Find the stream containing this event ID
     String? streamId;
@@ -69,19 +69,14 @@ McpServer getServer() {
     description: 'A simple greeting tool',
     toolInputSchema: ToolInputSchema(
       properties: {
-        'name': {
-          'type': 'string',
-          'description': 'Name to greet',
-        },
+        'name': {'type': 'string', 'description': 'Name to greet'},
       },
       required: ['name'],
     ),
     callback: ({args, extra}) async {
       final name = args?['name'] as String? ?? 'world';
       return CallToolResult.fromContent(
-        content: [
-          TextContent(text: 'Hello, $name!'),
-        ],
+        content: [TextContent(text: 'Hello, $name!')],
       );
     },
   );
@@ -93,10 +88,7 @@ McpServer getServer() {
         'A tool that sends different greetings with delays between them',
     toolInputSchema: ToolInputSchema(
       properties: {
-        'name': {
-          'type': 'string',
-          'description': 'Name to greet',
-        },
+        'name': {'type': 'string', 'description': 'Name to greet'},
       },
       required: [],
     ),
@@ -112,34 +104,41 @@ McpServer getServer() {
       Future<void> sleep(int ms) => Future.delayed(Duration(milliseconds: ms));
 
       // Send debug notification
-      await extra?.sendNotification(JsonRpcLoggingMessageNotification(
+      await extra?.sendNotification(
+        JsonRpcLoggingMessageNotification(
           logParams: LoggingMessageNotificationParams(
-        level: LoggingLevel.debug,
-        data: 'Starting multi-greet for $name',
-      )));
+            level: LoggingLevel.debug,
+            data: 'Starting multi-greet for $name',
+          ),
+        ),
+      );
 
       await sleep(1000); // Wait 1 second before first greeting
 
       // Send first info notification
-      await extra?.sendNotification(JsonRpcLoggingMessageNotification(
+      await extra?.sendNotification(
+        JsonRpcLoggingMessageNotification(
           logParams: LoggingMessageNotificationParams(
-        level: LoggingLevel.info,
-        data: 'Sending first greeting to $name',
-      )));
+            level: LoggingLevel.info,
+            data: 'Sending first greeting to $name',
+          ),
+        ),
+      );
 
       await sleep(1000); // Wait another second before second greeting
 
       // Send second info notification
-      await extra?.sendNotification(JsonRpcLoggingMessageNotification(
+      await extra?.sendNotification(
+        JsonRpcLoggingMessageNotification(
           logParams: LoggingMessageNotificationParams(
-        level: LoggingLevel.info,
-        data: 'Sending second greeting to $name',
-      )));
+            level: LoggingLevel.info,
+            data: 'Sending second greeting to $name',
+          ),
+        ),
+      );
 
       return CallToolResult.fromContent(
-        content: [
-          TextContent(text: 'Good morning, $name!'),
-        ],
+        content: [TextContent(text: 'Good morning, $name!')],
       );
     },
   );
@@ -200,12 +199,15 @@ McpServer getServer() {
       while (count == 0 || counter < count) {
         counter++;
         try {
-          await extra?.sendNotification(JsonRpcLoggingMessageNotification(
+          await extra?.sendNotification(
+            JsonRpcLoggingMessageNotification(
               logParams: LoggingMessageNotificationParams(
-            level: LoggingLevel.info,
-            data:
-                'Periodic notification #$counter at ${DateTime.now().toIso8601String()}',
-          )));
+                level: LoggingLevel.info,
+                data:
+                    'Periodic notification #$counter at ${DateTime.now().toIso8601String()}',
+              ),
+            ),
+          );
         } catch (error) {
           print('Error sending notification: $error');
         }
@@ -234,7 +236,7 @@ McpServer getServer() {
           ResourceContents.fromJson({
             'uri': 'https://example.com/greetings/default',
             'text': 'Hello, world!',
-            'mimeType': 'text/plain'
+            'mimeType': 'text/plain',
           }),
         ],
       );
@@ -247,10 +249,14 @@ McpServer getServer() {
 
 void setCorsHeaders(HttpResponse response) {
   response.headers.set('Access-Control-Allow-Origin', '*'); // Allow any origin
-  response.headers
-      .set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  response.headers.set('Access-Control-Allow-Headers',
-      'Origin, X-Requested-With, Content-Type, Accept, mcp-session-id, Last-Event-ID, Authorization');
+  response.headers.set(
+    'Access-Control-Allow-Methods',
+    'GET, POST, DELETE, OPTIONS',
+  );
+  response.headers.set(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, mcp-session-id, Last-Event-ID, Authorization',
+  );
   response.headers.set('Access-Control-Allow-Credentials', 'true');
   response.headers.set('Access-Control-Max-Age', '86400'); // 24 hours
   response.headers.set('Access-Control-Expose-Headers', 'mcp-session-id');
@@ -260,11 +266,14 @@ void main() async {
   // Map to store transports by session ID
   final transports = <String, StreamableHTTPServerTransport>{};
 
+  int reqHit = 0;
+
   // Create HTTP server
-  final server = await HttpServer.bind(InternetAddress.anyIPv4, 3111);
+  final server = await HttpServer.bind(InternetAddress.anyIPv4, 3000);
   print('MCP Streamable HTTP Server listening on port 3000');
 
   await for (final request in server) {
+    ++reqHit;
     // Apply CORS headers to all responses
     setCorsHeaders(request.response);
 
@@ -284,6 +293,24 @@ void main() async {
       continue;
     }
 
+    final currentHit = reqHit;
+    bool isDone = false;
+    print(
+      ">>> request: $currentHit ${request.method} ${request.uri.toString()}",
+    );
+    request.response.done.then((_) {
+      isDone = true;
+      print("<<<<<<< request done: $currentHit");
+    });
+    // if (request.method == "POST") {
+    //   Timer(Duration(seconds: 5), () async {
+    //     if (false == isDone) {
+    //       print("====== request force done: $currentHit");
+    //       request.response.close();
+    //     }
+    //   });
+    // }
+
     switch (request.method) {
       case 'OPTIONS':
         // Handle preflight requests
@@ -291,7 +318,7 @@ void main() async {
         await request.response.close();
         break;
       case 'POST':
-        await handlePostRequest(request, transports);
+        await handlePostRequest(currentHit, request, transports);
         break;
       case 'GET':
         await handleGetRequest(request, transports);
@@ -323,16 +350,19 @@ bool isInitializeRequest(dynamic body) {
 
 // Handle POST requests
 Future<void> handlePostRequest(
+  int hit,
   HttpRequest request,
   Map<String, StreamableHTTPServerTransport> transports,
 ) async {
-  print('Received MCP request');
+  print('Received MCP POST request: ');
 
   try {
     // Parse the body
     final bodyBytes = await collectBytes(request);
     final bodyString = utf8.decode(bodyBytes);
     final body = jsonDecode(bodyString);
+    bool isPing = bodyString.contains("/list");
+    print("reqdata $hit ${body}");
 
     // Check for existing session ID
     final sessionId = request.headers.value('mcp-session-id');
@@ -361,7 +391,8 @@ Future<void> handlePostRequest(
         final sid = transport!.sessionId;
         if (sid != null && transports.containsKey(sid)) {
           print(
-              'Transport closed for session $sid, removing from transports map');
+            'Transport closed for session $sid, removing from transports map',
+          );
           transports.remove(sid);
         }
       };
@@ -371,8 +402,6 @@ Future<void> handlePostRequest(
       await server.connect(transport);
 
       print('Handling initialization request for a new session');
-      await transport.handleRequest(request, body);
-      return; // Already handled
     } else {
       // Invalid request - no session ID or not initialization request
       request.response
@@ -381,14 +410,16 @@ Future<void> handlePostRequest(
       // Apply CORS headers to this specific response
       setCorsHeaders(request.response);
       request.response
-        ..write(jsonEncode({
-          'jsonrpc': '2.0',
-          'error': {
-            'code': -32000,
-            'message': 'Bad Request: No valid session ID provided',
-          },
-          'id': null,
-        }))
+        ..write(
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'error': {
+              'code': -32000,
+              'message': 'Bad Request: No valid session ID provided',
+            },
+            'id': null,
+          }),
+        )
         ..close();
       return;
     }
@@ -400,9 +431,9 @@ Future<void> handlePostRequest(
     // Check if headers are already sent
     bool headersSent = false;
     try {
-      headersSent = request.response.headers.contentType
-          .toString()
-          .startsWith('text/event-stream');
+      headersSent = request.response.headers.contentType.toString().startsWith(
+        'text/event-stream',
+      );
     } catch (_) {
       // Ignore errors when checking headers
     }
@@ -414,14 +445,13 @@ Future<void> handlePostRequest(
       // Apply CORS headers
       setCorsHeaders(request.response);
       request.response
-        ..write(jsonEncode({
-          'jsonrpc': '2.0',
-          'error': {
-            'code': -32603,
-            'message': 'Internal server error',
-          },
-          'id': null,
-        }))
+        ..write(
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'error': {'code': -32603, 'message': 'Internal server error'},
+            'id': null,
+          }),
+        )
         ..close();
     }
   }
@@ -481,9 +511,9 @@ Future<void> handleDeleteRequest(
     // Check if headers are already sent
     bool headersSent = false;
     try {
-      headersSent = request.response.headers.contentType
-          .toString()
-          .startsWith('text/event-stream');
+      headersSent = request.response.headers.contentType.toString().startsWith(
+        'text/event-stream',
+      );
     } catch (_) {
       // Ignore errors when checking headers
     }
