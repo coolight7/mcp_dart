@@ -1,14 +1,26 @@
-name: Run Tests on PR
+name: Run CLI Tests on PR
+
+permissions:
+  contents: read
 
 on:
   pull_request:
+    paths:
+      - 'packages/mcp_dart_cli/**'
+      - '.github/workflows/test_cli.yml'
   push:
     branches:
       - main
+    paths:
+      - 'packages/mcp_dart_cli/**'
+      - '.github/workflows/test_cli.yml'
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/mcp_dart_cli
 
     steps:
       - name: Checkout code
@@ -22,13 +34,11 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
-      - name: Running tests with coverage
-        run: |
-          dart pub global activate coverage
-          dart pub global run coverage:test_with_coverage
+      - name: Analyze project
+        run: dart analyze
 
-      - name: Validate package for publishing
-        run: dart pub publish --dry-run
+      - name: Run tests
+        run: dart test
 
       - name: Run pana (package analysis)
         run: |
@@ -39,20 +49,15 @@ jobs:
           SCORE=$(echo "$RESULT" | grep -o '"grantedPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$')
           MAX_POINTS=$(echo "$RESULT" | grep -o '"maxPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$')
           echo "Pana score: $SCORE/$MAX_POINTS"
-          if [ "$SCORE" != "160" ] || [ "$MAX_POINTS" != "160" ]; then
-            echo "Error: Package score is $SCORE/$MAX_POINTS. Required: 160/160"
+          # We might want to enforce a threshold, e.g. 130 or 140 initially.
+          # For now, let's strict check if it matches expectation or just warn.
+          # Given the previous task aimed for 160/160, let's keep it strict but maybe allow slight dev.
+          # For this initial workflow file, I will fail if not max points to maintain quality.
+          if [ "$SCORE" != "$MAX_POINTS" ]; then
+            echo "Error: Package score is $SCORE/$MAX_POINTS."
             echo ""
             echo "Detailed report:"
             dart pub global run pana --no-warning
             exit 1
           fi
-          echo "✓ Package achieves perfect 160/160 score"
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: true
+          echo "✓ Package achieves perfect score"

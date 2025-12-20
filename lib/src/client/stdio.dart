@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert'; // For utf8 encoding if needed
+
 import 'dart:io' as io; // Use 'io' prefix
 import 'dart:typed_data'; // For Uint8List
 
@@ -113,21 +113,15 @@ class StdioClientTransport implements Transport {
       );
     }
     _started = true;
-
-    final mode = (_serverParams.stderrMode == io.ProcessStartMode.normal)
-        ? io.ProcessStartMode.normal // Use normal for pipe access
-        : io.ProcessStartMode.inheritStdio; // More direct inheritance
-
     try {
       // Start the process.
       _process = await io.Process.start(
         _serverParams.command,
         _serverParams.args,
         workingDirectory: _serverParams.workingDirectory,
-        environment:
-            _serverParams.environment, // Use provided or inherit Dart default
-        runInShell: false, // Generally safer
-        mode: mode, // Handles stdin/stdout/stderr piping/inheritance
+        environment: _serverParams.environment,
+        runInShell: false,
+        mode: io.ProcessStartMode.normal, // Always use normal to enable piping
       );
 
       _logger.debug(
@@ -147,12 +141,12 @@ class StdioClientTransport implements Transport {
       // Listen to stderr if piped
       if (_serverParams.stderrMode == io.ProcessStartMode.normal) {
         // Expose stderr via getter, let user handle it.
-        // Optionally add logging here:
+        // Do NOT listen here, as that would prevent the user from listening.
+      } else {
+        // Inherit stderr (manually pipe to parent stderr)
         _stderrSubscription = _process!.stderr.listen(
-          (data) => _logger.debug(
-            "Server stderr: ${utf8.decode(data, allowMalformed: true)}",
-          ),
-          onError: _onStreamError, // Report stderr stream errors too
+          (data) => io.stderr.add(data),
+          onError: _onStreamError,
         );
       }
 
@@ -308,7 +302,7 @@ class StdioClientTransport implements Transport {
         "StdioClientTransport: Terminating process (PID: ${processToKill.pid})...",
       );
       // Attempt graceful termination first
-      bool killed = processToKill.kill(io.ProcessSignal.sigterm);
+      final bool killed = processToKill.kill(io.ProcessSignal.sigterm);
       if (!killed) {
         _logger.debug(
           "StdioClientTransport: Failed to send SIGTERM or process already exited.",
@@ -354,7 +348,7 @@ class StdioClientTransport implements Transport {
   /// process's stdin stream. Throws [StateError] if the transport is not started
   /// or the process is not running.
   @override
-  Future<void> send(JsonRpcMessage message) async {
+  Future<void> send(JsonRpcMessage message, {int? relatedRequestId}) async {
     final currentProcess = _process; // Capture locally
     if (!_started || currentProcess == null) {
       throw StateError(
