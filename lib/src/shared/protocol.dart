@@ -64,7 +64,7 @@ class RequestOptions {
   final Duration? maxTotalTimeout;
 
   /// Augments the request with task creation parameters.
-  final TaskCreationParams? task;
+  final TaskCreation? task;
 
   /// Associates this request with a related task.
   final RelatedTaskMetadata? relatedTask;
@@ -142,6 +142,43 @@ class RequestHandlerExtra {
     this.closeSSEStream,
     this.closeStandaloneSSEStream,
   });
+
+  /// Sends a progress notification for the current request.
+  ///
+  /// This method automatically retrieves the `progressToken` from the request metadata.
+  /// If the client did not provide a progress token, this method does nothing (or logs a warning).
+  Future<void> sendProgress(
+    double progress, {
+    double? total,
+    String? message,
+  }) async {
+    final progressToken = meta?['progressToken'];
+    if (progressToken == null) {
+      _logger.warn(
+        "Attempted to send progress for request $requestId, but no progressToken was provided by the client.",
+      );
+      return;
+    }
+
+    // progressToken can be int or string
+    if (progressToken is! int && progressToken is! String) {
+      _logger.warn(
+        "Invalid progressToken type: ${progressToken.runtimeType}. Expected int or String.",
+      );
+      return;
+    }
+
+    final notification = JsonRpcProgressNotification(
+      progressParams: ProgressNotification(
+        progressToken: progressToken,
+        progress: progress,
+        total: total,
+        message: message,
+      ),
+    );
+
+    await sendNotification(notification);
+  }
 }
 
 /// Internal class holding timeout state for a request.
@@ -766,6 +803,7 @@ abstract class Protocol {
       final progressData = Progress(
         progress: params.progress,
         total: params.total,
+        message: params.message,
       );
       progressHandler(progressData);
     } catch (e) {
@@ -944,7 +982,7 @@ abstract class Protocol {
       meta: finalMeta,
     );
 
-    void cancel([dynamic reason]) {
+    void cancel([Object? reason]) {
       if (completer.isCompleted) return;
 
       _responseCompleters.remove(messageId);
@@ -954,7 +992,7 @@ abstract class Protocol {
 
       final cancelReason = reason?.toString() ?? 'Request cancelled';
       final notification = JsonRpcCancelledNotification(
-        cancelParams: CancelledNotificationParams(
+        cancelParams: CancelledNotification(
           requestId: messageId,
           reason: cancelReason,
         ),
@@ -1284,7 +1322,7 @@ abstract class Protocol {
         final currentTask = await request<Task>(
           JsonRpcGetTaskRequest(
             id: 0, // ID will be overwritten
-            getParams: GetTaskRequestParams(taskId: taskId),
+            getParams: GetTaskRequest(taskId: taskId),
           ),
           (json) => Task.fromJson(json),
           options,
@@ -1296,7 +1334,7 @@ abstract class Protocol {
             final result = await request<T>(
               JsonRpcTaskResultRequest(
                 id: 0,
-                resultParams: TaskResultRequestParams(taskId: taskId),
+                resultParams: TaskResultRequest(taskId: taskId),
               ),
               resultFactory,
               options,
@@ -1319,7 +1357,7 @@ abstract class Protocol {
           final result = await request<T>(
             JsonRpcTaskResultRequest(
               id: 0,
-              resultParams: TaskResultRequestParams(taskId: taskId),
+              resultParams: TaskResultRequest(taskId: taskId),
             ),
             resultFactory,
             options,
@@ -1451,7 +1489,7 @@ class _RequestTaskStoreImpl implements RequestTaskStore {
   );
 
   @override
-  Future<Task> createTask(TaskCreationParams taskParams) {
+  Future<Task> createTask(TaskCreation taskParams) {
     return _store.createTask(
       taskParams,
       _request.id,
@@ -1482,7 +1520,7 @@ class _RequestTaskStoreImpl implements RequestTaskStore {
     final task = await _store.getTask(taskId, _sessionId);
     if (task != null) {
       final notification = JsonRpcTaskStatusNotification(
-        statusParams: TaskStatusNotificationParams(
+        statusParams: TaskStatusNotification(
           taskId: task.taskId,
           status: task.status,
           statusMessage: task.statusMessage,
@@ -1528,7 +1566,7 @@ class _RequestTaskStoreImpl implements RequestTaskStore {
     final updatedTask = await _store.getTask(taskId, _sessionId);
     if (updatedTask != null) {
       final notification = JsonRpcTaskStatusNotification(
-        statusParams: TaskStatusNotificationParams(
+        statusParams: TaskStatusNotification(
           taskId: updatedTask.taskId,
           status: updatedTask.status,
           statusMessage: updatedTask.statusMessage,

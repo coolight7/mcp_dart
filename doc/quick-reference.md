@@ -7,7 +7,7 @@ Fast lookup guide for common MCP Dart SDK operations.
 ```yaml
 # pubspec.yaml
 dependencies:
-  mcp_dart: ^1.1.2
+  mcp_dart: ^1.3.0
 ```
 
 ```bash
@@ -30,7 +30,7 @@ final server = McpServer(
     name: 'server-name',
     version: '1.0.0',
   ),
-  options: ServerOptions(
+  options: McpServerOptions(
     capabilities: ServerCapabilities(
       tools: ServerCapabilitiesTools(),
     ),
@@ -48,8 +48,30 @@ final server = StreamableMcpServer(
   host: '0.0.0.0',
   port: 3000,
   path: '/mcp',
+  // Optional hardening for browser-accessible deployments
+  enableDnsRebindingProtection: true,
+  allowedHosts: {'localhost', 'api.example.com'},
+  allowedOrigins: {'https://app.example.com'},
 );
 await server.start();
+```
+
+### Streamable HTTP Transport Options
+
+```dart
+final transport = StreamableHTTPServerTransport(
+  options: StreamableHTTPServerTransportOptions(
+    sessionIdGenerator: () =>
+        'session-${DateTime.now().millisecondsSinceEpoch}',
+    eventStore: InMemoryEventStore(),
+    enableDnsRebindingProtection: true,
+    allowedHosts: {'localhost'},
+    allowedOrigins: {'http://localhost:5173'},
+  ),
+);
+
+await transport.start();
+await server.connect(transport);
 ```
 
 ### Register Tool
@@ -147,12 +169,10 @@ server.registerPrompt(
 ### Register Tasks
 
 ```dart
-server.tasks(
-  listCallback: (extra) async => ListTasksResult(tasks: []),
-  cancelCallback: (taskId, extra) async { /* cancel */ },
-  getCallback: (taskId, extra) async { /* get */ },
-  resultCallback: (taskId, extra) async { /* result */ },
-);
+server.experimental.onListTasks((extra) async => ListTasksResult(tasks: []));
+server.experimental.onCancelTask((taskId, extra) async { /* cancel */ });
+server.experimental.onGetTask((taskId, extra) async { /* get */ });
+server.experimental.onTaskResult((taskId, extra) async { /* result */ });
 ```
 
 ### Connect Transport
@@ -175,7 +195,7 @@ await server.connect(transport);
 ### Create Client
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(
     name: 'client-name',
     version: '1.0.0',
@@ -239,6 +259,7 @@ print(result.content.first.text);
 final result = await client.listResources();
 for (final resource in result.resources) {
   print('${resource.name}: ${resource.uri}');
+  print('lastModified: ${resource.annotations?.lastModified}');
 }
 ```
 
@@ -327,33 +348,6 @@ server.registerTool(
 );
 ```
 
-### Tool with Progress
-
-```dart
-server.registerTool(
-  'long-task',
-  inputSchema: ToolInputSchema(properties: {}),
-  callback: (args, extra) async {
-    final token = extra.progressToken;
-
-    for (var i = 0; i <= 100; i += 10) {
-      await processStep(i);
-
-      if (token != null) {
-        await server.sendProgress(
-          progressToken: token,
-          progress: i,
-          total: 100,
-        );
-      }
-    }
-
-    return CallToolResult(
-      content: [TextContent(text: 'Complete')],
-    );
-  },
-);
-```
 
 ### Tool Annotations
 
@@ -391,6 +385,24 @@ TextContent(text: 'Hello, world!')
 ImageContent(
   data: base64Encode(bytes),
   mimeType: 'image/png',
+  theme: 'dark', // optional: 'light' | 'dark'
+)
+```
+
+### Resource Link
+
+```dart
+ResourceLink(
+  uri: 'file:///docs/architecture.md',
+  name: 'architecture',
+  mimeType: 'text/markdown',
+  icons: [
+    McpIcon(
+      src: 'https://example.com/icon.png',
+      mimeType: 'image/png',
+      theme: IconTheme.dark,
+    ),
+  ],
 )
 ```
 
@@ -528,22 +540,14 @@ try {
 
 ## Notifications
 
-### Send Progress
-
-```dart
-await server.sendProgress(
-  progressToken: 'token-123',
-  progress: 50,
-  total: 100,
-);
-```
-
 ### Send Log Message
 
 ```dart
-await server.sendLogMessage(
-  level: LoggingLevel.info,
-  message: 'Processing started',
+await server.sendLoggingMessage(
+  LoggingMessageNotification(
+    level: LoggingLevel.info,
+    data: 'Processing started',
+  ),
 );
 ```
 
@@ -569,7 +573,7 @@ await server.sendPromptListChanged();
 final server = McpServer(
   Implementation(name: 'server', version: '1.0.0'),
   // Capabilities auto-detected from registrations
-  options: ServerOptions(
+  options: McpServerOptions(
     capabilities: ServerCapabilities(
       tools: ServerCapabilitiesTools(),
     ),
@@ -580,7 +584,7 @@ final server = McpServer(
 ### Client Capabilities
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(name: 'client', version: '1.0.0'),
   capabilities: ClientCapabilities(
     sampling: ClientCapabilitiesSampling(tools: true),
@@ -618,9 +622,15 @@ LoggingLevel.emergency
 ### Receive Logs
 
 ```dart
-client.onLogMessage = (notification) {
-  print('[${notification.level}] ${notification.data}');
-};
+client.setNotificationHandler<JsonRpcLoggingMessageNotification>(
+  Method.notificationsMessage,
+  (notification) async {
+    print('[${notification.logParams.level}] ${notification.logParams.data}');
+  },
+  (params, meta) => JsonRpcLoggingMessageNotification(
+    logParams: LoggingMessageNotification.fromJson(params ?? {}),
+  ),
+);
 ```
 
 ## Resource Subscriptions
@@ -636,10 +646,16 @@ await client.subscribeResource(SubscribeRequest(
 ### Handle Updates
 
 ```dart
-client.onResourceUpdated = (notification) {
-  print('Updated: ${notification.uri}');
-  // Re-read resource
-};
+client.setNotificationHandler<JsonRpcResourceUpdatedNotification>(
+  Method.notificationsResourcesUpdated,
+  (notification) async {
+    print('Updated: ${notification.updatedParams.uri}');
+    // Re-read resource
+  },
+  (params, meta) => JsonRpcResourceUpdatedNotification(
+    updatedParams: ResourceUpdatedNotification.fromJson(params ?? {}),
+  ),
+);
 ```
 
 ### Unsubscribe
@@ -720,7 +736,7 @@ test('example', () async {
     outputSink: s2c.sink,
   ));
 
-  final client = Client(...);
+  final client = McpClient(...);
   await client.connect(IOStreamTransport(
     inputStream: s2c.stream,
     outputSink: c2s.sink,
@@ -756,7 +772,6 @@ if (Platform.isWeb) {
 - ✅ Use type-safe argument access: `args['key'] as Type`
 - ✅ Provide clear descriptions for tools/resources/prompts
 - ✅ Use appropriate tool hints (readOnly, destructive, etc.)
-- ✅ Send progress for long-running operations
 - ✅ Check server capabilities before using features
 - ✅ Sanitize and validate user inputs for security
 - ✅ Use meaningful error messages

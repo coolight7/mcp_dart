@@ -1,3 +1,76 @@
+## 1.3.0
+
+- **Spec Alignment**:
+  - Added `ResourceLink` (`resource_link`) content type support.
+  - Added icon metadata support with `McpIcon`, `IconTheme`, and optional `icons` fields across tools/prompts/resources/templates.
+  - Added `ResourceAnnotations.lastModified` (ISO 8601).
+  - Added MCP `extensions` capability support for client/server initialization capability negotiation.
+- **Security**:
+  - Added optional DNS rebinding protection to streamable HTTP/SSE server entry points via host/origin allowlists.
+- **Reliability**:
+  - Tightened null handling for JSON-RPC tool params and task store TTL parsing paths.
+  - Fixed URI template matching for RFC 6570 multi-variable operators (for example `{?status,assignee}`) so `resources/read` resolves templated URIs correctly.
+  - Fixed tool metadata passthrough so registered `meta` (including nested `_meta` values) is preserved in `tools/list` responses.
+  - Improved URI template variable typing and protocol cancellation reason typing.
+- **Docs**:
+  - Updated transport, client, server, tools, and quick-reference docs for new fields and security options.
+
+## 1.2.2
+
+- Fix pana analysis issues
+
+## 1.2.1
+
+- **Features**:
+  - **Progress Notifications**: Implemented full support for progress tracking.
+    - Added `RequestHandlerExtra.sendProgress()` helper for servers to report progress.
+    - Added `RequestOptions.onprogress` callback for clients to receive progress updates.
+    - Updated `Progress` and `ProgressNotification` types to include optional `message` field (compliant with 2025-11-25 spec).
+  - **Protocol Improvements**:
+    - `JsonRpcMessage.fromJson` now supports custom/unknown methods instead of throwing.
+    - Fixed `JsonRpcRequest` metadata extraction to correctly handle nested `_meta` in `params`.
+    - Updated `ToolAnnotations` to make `title` optional, preventing deserialization errors when the field is missing.
+
+- **Fixes**:
+  - **StreamableHTTP**: Prevented the client from attempting to "reconnect" to short-lived POST response streams (used for tool calls). This fixes an issue where multiple tool calls could exhaust the browser's connection limit by spawning zombie reconnection attempts.
+
+- **Examples**:
+  - **New Jaspr Client**: Added a comprehensive web client example (`example/jaspr-client`) built with Jaspr, featuring:
+    - Interactive UI for Tools, Resources, Prompts, and Tasks.
+    - Real-time connection management.
+    - Visual task progression and sampling dialogs.
+  - **Anthropic Client**: Fixed issues in the Anthropic client example.
+  - **Task Server**: Added CORS headers and logging to `simple_task_interactive_server.dart`.
+  - Updated examples to remove deprecated API usage.
+
+- **Documentation**:
+  - Overhauled documentation (`doc/`) to match current API (v1.1.2+).
+  - Added `AGENTS.md` with comprehensive developer guidelines.
+
+- **Testing**:
+  - Updated `test/types_test.dart` and `test/types_edge_cases_test.dart` to correct expectations for unknown methods. `JsonRpcMessage.fromJson` returns a generic `JsonRpcRequest` (or `JsonRpcNotification`) for unknown methods instead of throwing, aligning tests with existing library behavior.
+
+## 1.2.0
+
+### Breaking Changes
+
+> [!TIP]
+> All breaking changes below are auto-fixable. Run `dart fix --apply` to automatically update your code.
+
+- **Renamed Core Classes**:
+  - `Client` is now `McpClient` to avoid conflicts with other libraries (like `http`).
+  - `ClientOptions` is now `McpClientOptions`.
+  - `ServerOptions` is now `McpServerOptions`.
+- **Renamed Request/Notification Parameters**:
+  - `ReadResourceRequestParams` -> `ReadResourceRequest`
+  - `GetPromptRequestParams` -> `GetPromptRequest`
+  - `ElicitRequestParams` -> `ElicitRequest`
+  - `CreateMessageRequestParams` -> `CreateMessageRequest`
+  - `LoggingMessageNotificationParams` -> `LoggingMessageNotification`
+  - `CancelledNotificationParams` -> `CancelledNotification`
+  - `ProgressNotificationParams` -> `ProgressNotification`
+  - `TaskCreationParams` -> `TaskCreation`
+
 ## 1.1.2
 
 - **Fixed StdioClientTransport stderr handling**: Corrected process mode to always use `ProcessStartMode.normal` to ensure stdin/stdout piping works correctly. Fixed inverted stderr mode logic where `stderrMode: normal` now properly exposes stderr via getter (without internal listening), and `stderrMode: inheritStdio` now manually pipes stderr to parent process.

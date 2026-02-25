@@ -196,22 +196,19 @@ void main() {
   });
 
   group('JsonRpcMessage.fromJson Additional Edge Cases', () {
-    test('throws UnimplementedError for unknown notification method', () {
+    test('returns generic JsonRpcNotification for unknown notification method',
+        () {
       final json = {
         'jsonrpc': '2.0',
         'method': 'notifications/unknown',
         // No 'id' makes it a notification
       };
 
+      final message = JsonRpcMessage.fromJson(json);
+      expect(message, isA<JsonRpcNotification>());
       expect(
-        () => JsonRpcMessage.fromJson(json),
-        throwsA(
-          isA<UnimplementedError>().having(
-            (e) => e.message,
-            'message',
-            contains('notification method'),
-          ),
-        ),
+        (message as JsonRpcNotification).method,
+        equals('notifications/unknown'),
       );
     });
 

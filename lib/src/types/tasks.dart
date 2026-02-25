@@ -70,8 +70,7 @@ class Task implements BaseResultData {
   final int? pollInterval;
 
   /// ISO 8601 timestamp when the task was created.
-  final String?
-      createdAt; // Spec implies defined, but check optionality. Schema usually defines required. Task definition: taskId, status (implied required). Others optional? "createdAt: ISO 8601 timestamp". "optional" not explicitly stated for createdAt, but likely required for accounting. I'll make it optional to be safe or required if I'm sure. I'll make it optional.
+  final String? createdAt;
 
   /// ISO 8601 timestamp when the task status was last updated.
   final String? lastUpdatedAt;
@@ -119,14 +118,14 @@ class Task implements BaseResultData {
 }
 
 /// Parameters for the `tasks/list` request. Includes pagination.
-class ListTasksRequestParams {
+class ListTasksRequest {
   /// Opaque token for pagination.
   final Cursor? cursor;
 
-  const ListTasksRequestParams({this.cursor});
+  const ListTasksRequest({this.cursor});
 
-  factory ListTasksRequestParams.fromJson(Map<String, dynamic> json) =>
-      ListTasksRequestParams(cursor: json['cursor'] as String?);
+  factory ListTasksRequest.fromJson(Map<String, dynamic> json) =>
+      ListTasksRequest(cursor: json['cursor'] as String?);
 
   Map<String, dynamic> toJson() => {if (cursor != null) 'cursor': cursor};
 }
@@ -134,13 +133,13 @@ class ListTasksRequestParams {
 /// Request sent from client to list available tasks.
 class JsonRpcListTasksRequest extends JsonRpcRequest {
   /// The list parameters (containing cursor).
-  final ListTasksRequestParams listParams;
+  final ListTasksRequest listParams;
 
   JsonRpcListTasksRequest({
     required super.id,
-    ListTasksRequestParams? params,
+    ListTasksRequest? params,
     super.meta,
-  })  : listParams = params ?? const ListTasksRequestParams(),
+  })  : listParams = params ?? const ListTasksRequest(),
         super(method: Method.tasksList, params: params?.toJson());
 
   factory JsonRpcListTasksRequest.fromJson(Map<String, dynamic> json) {
@@ -148,8 +147,7 @@ class JsonRpcListTasksRequest extends JsonRpcRequest {
     final meta = paramsMap?['_meta'] as Map<String, dynamic>?;
     return JsonRpcListTasksRequest(
       id: json['id'],
-      params:
-          paramsMap == null ? null : ListTasksRequestParams.fromJson(paramsMap),
+      params: paramsMap == null ? null : ListTasksRequest.fromJson(paramsMap),
       meta: meta,
     );
   }
@@ -189,14 +187,14 @@ class ListTasksResult implements BaseResultData {
 }
 
 /// Parameters for the `tasks/cancel` request.
-class CancelTaskRequestParams {
+class CancelTaskRequest {
   /// The ID of the task to cancel.
   final String taskId;
 
-  const CancelTaskRequestParams({required this.taskId});
+  const CancelTaskRequest({required this.taskId});
 
-  factory CancelTaskRequestParams.fromJson(Map<String, dynamic> json) =>
-      CancelTaskRequestParams(taskId: json['taskId'] as String);
+  factory CancelTaskRequest.fromJson(Map<String, dynamic> json) =>
+      CancelTaskRequest(taskId: json['taskId'] as String);
 
   Map<String, dynamic> toJson() => {'taskId': taskId};
 }
@@ -204,7 +202,7 @@ class CancelTaskRequestParams {
 /// Request sent from client to cancel a task.
 class JsonRpcCancelTaskRequest extends JsonRpcRequest {
   /// The cancel parameters.
-  final CancelTaskRequestParams cancelParams;
+  final CancelTaskRequest cancelParams;
 
   JsonRpcCancelTaskRequest({
     required super.id,
@@ -220,21 +218,21 @@ class JsonRpcCancelTaskRequest extends JsonRpcRequest {
     final meta = paramsMap['_meta'] as Map<String, dynamic>?;
     return JsonRpcCancelTaskRequest(
       id: json['id'],
-      cancelParams: CancelTaskRequestParams.fromJson(paramsMap),
+      cancelParams: CancelTaskRequest.fromJson(paramsMap),
       meta: meta,
     );
   }
 }
 
 /// Parameters for the `tasks/get` request.
-class GetTaskRequestParams {
+class GetTaskRequest {
   /// The ID of the task to get.
   final String taskId;
 
-  const GetTaskRequestParams({required this.taskId});
+  const GetTaskRequest({required this.taskId});
 
-  factory GetTaskRequestParams.fromJson(Map<String, dynamic> json) =>
-      GetTaskRequestParams(taskId: json['taskId'] as String);
+  factory GetTaskRequest.fromJson(Map<String, dynamic> json) =>
+      GetTaskRequest(taskId: json['taskId'] as String);
 
   Map<String, dynamic> toJson() => {'taskId': taskId};
 }
@@ -242,7 +240,7 @@ class GetTaskRequestParams {
 /// Request sent from client to get task status.
 class JsonRpcGetTaskRequest extends JsonRpcRequest {
   /// The get task parameters.
-  final GetTaskRequestParams getParams;
+  final GetTaskRequest getParams;
 
   JsonRpcGetTaskRequest({
     required super.id,
@@ -258,21 +256,21 @@ class JsonRpcGetTaskRequest extends JsonRpcRequest {
     final meta = paramsMap['_meta'] as Map<String, dynamic>?;
     return JsonRpcGetTaskRequest(
       id: json['id'],
-      getParams: GetTaskRequestParams.fromJson(paramsMap),
+      getParams: GetTaskRequest.fromJson(paramsMap),
       meta: meta,
     );
   }
 }
 
 /// Parameters for the `tasks/result` request.
-class TaskResultRequestParams {
+class TaskResultRequest {
   /// The ID of the task to get results for.
   final String taskId;
 
-  const TaskResultRequestParams({required this.taskId});
+  const TaskResultRequest({required this.taskId});
 
-  factory TaskResultRequestParams.fromJson(Map<String, dynamic> json) =>
-      TaskResultRequestParams(taskId: json['taskId'] as String);
+  factory TaskResultRequest.fromJson(Map<String, dynamic> json) =>
+      TaskResultRequest(taskId: json['taskId'] as String);
 
   Map<String, dynamic> toJson() => {'taskId': taskId};
 }
@@ -280,7 +278,7 @@ class TaskResultRequestParams {
 /// Request sent from client to retrieve task results.
 class JsonRpcTaskResultRequest extends JsonRpcRequest {
   /// The task result parameters.
-  final TaskResultRequestParams resultParams;
+  final TaskResultRequest resultParams;
 
   JsonRpcTaskResultRequest({
     required super.id,
@@ -296,21 +294,21 @@ class JsonRpcTaskResultRequest extends JsonRpcRequest {
     final meta = paramsMap['_meta'] as Map<String, dynamic>?;
     return JsonRpcTaskResultRequest(
       id: json['id'],
-      resultParams: TaskResultRequestParams.fromJson(paramsMap),
+      resultParams: TaskResultRequest.fromJson(paramsMap),
       meta: meta,
     );
   }
 }
 
 /// Parameters for task creation when augmenting requests.
-class TaskCreationParams {
+class TaskCreation {
   /// Requested duration in milliseconds to retain task from creation.
   final int? ttl;
 
-  const TaskCreationParams({this.ttl});
+  const TaskCreation({this.ttl});
 
-  factory TaskCreationParams.fromJson(Map<String, dynamic> json) =>
-      TaskCreationParams(ttl: json['ttl'] as int?);
+  factory TaskCreation.fromJson(Map<String, dynamic> json) =>
+      TaskCreation(ttl: json['ttl'] as int?);
 
   Map<String, dynamic> toJson() => {
         if (ttl != null) 'ttl': ttl,
@@ -369,7 +367,7 @@ class TaskErrorMessage extends TaskStreamMessage {
 }
 
 /// Parameters for the `notifications/tasks/status` notification.
-class TaskStatusNotificationParams {
+class TaskStatusNotification {
   /// The ID of the task.
   final String taskId;
 
@@ -391,7 +389,7 @@ class TaskStatusNotificationParams {
   /// ISO 8601 timestamp when the task status was last updated.
   final String? lastUpdatedAt;
 
-  const TaskStatusNotificationParams({
+  const TaskStatusNotification({
     required this.taskId,
     required this.status,
     this.statusMessage,
@@ -401,8 +399,8 @@ class TaskStatusNotificationParams {
     this.lastUpdatedAt,
   });
 
-  factory TaskStatusNotificationParams.fromJson(Map<String, dynamic> json) {
-    return TaskStatusNotificationParams(
+  factory TaskStatusNotification.fromJson(Map<String, dynamic> json) {
+    return TaskStatusNotification(
       taskId: json['taskId'] as String,
       status: TaskStatusName.fromString(json['status'] as String),
       statusMessage: json['statusMessage'] as String?,
@@ -427,7 +425,7 @@ class TaskStatusNotificationParams {
 /// Notification from receiver indicating a task status has changed.
 class JsonRpcTaskStatusNotification extends JsonRpcNotification {
   /// The task status parameters.
-  final TaskStatusNotificationParams statusParams;
+  final TaskStatusNotification statusParams;
 
   JsonRpcTaskStatusNotification({required this.statusParams, super.meta})
       : super(
@@ -444,8 +442,32 @@ class JsonRpcTaskStatusNotification extends JsonRpcNotification {
     }
     final meta = paramsMap['_meta'] as Map<String, dynamic>?;
     return JsonRpcTaskStatusNotification(
-      statusParams: TaskStatusNotificationParams.fromJson(paramsMap),
+      statusParams: TaskStatusNotification.fromJson(paramsMap),
       meta: meta,
     );
   }
 }
+
+/// Deprecated alias for [ListTasksRequest].
+@Deprecated('Use ListTasksRequest instead')
+typedef ListTasksRequestParams = ListTasksRequest;
+
+/// Deprecated alias for [CancelTaskRequest].
+@Deprecated('Use CancelTaskRequest instead')
+typedef CancelTaskRequestParams = CancelTaskRequest;
+
+/// Deprecated alias for [GetTaskRequest].
+@Deprecated('Use GetTaskRequest instead')
+typedef GetTaskRequestParams = GetTaskRequest;
+
+/// Deprecated alias for [TaskResultRequest].
+@Deprecated('Use TaskResultRequest instead')
+typedef TaskResultRequestParams = TaskResultRequest;
+
+/// Deprecated alias for [TaskStatusNotification].
+@Deprecated('Use TaskStatusNotification instead')
+typedef TaskStatusNotificationParams = TaskStatusNotification;
+
+/// Deprecated alias for [TaskCreation].
+@Deprecated('Use TaskCreation instead')
+typedef TaskCreationParams = TaskCreation;

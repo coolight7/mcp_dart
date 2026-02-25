@@ -23,7 +23,7 @@ Complete guide to building MCP clients with the Dart SDK.
 import 'package:mcp_dart/mcp_dart.dart';
 
 void main() async {
-  final client = Client(
+  final client = McpClient(
     Implementation(
       name: 'my-client',
       version: '1.0.0',
@@ -49,7 +49,7 @@ void main() async {
 ### Client Configuration Options
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(
     name: 'my-client',
     version: '1.0.0',
@@ -65,7 +65,7 @@ final client = Client(
 Declare what your client supports:
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(
     name: 'my-client',
     version: '1.0.0',
@@ -106,8 +106,31 @@ for (final content in result.content) {
     print(content.text);
   } else if (content is ImageContent) {
     print('Image: ${content.mimeType}');
+  } else if (content is ResourceLink) {
+    print('Linked resource: ${content.uri}');
   }
 }
+```
+
+### Receive Tool Progress
+
+You can provide a callback to receive progress updates from long-running tools.
+
+```dart
+final result = await client.callTool(
+  CallToolRequest(
+    name: 'long-running-tool',
+    arguments: {},
+  ),
+  options: RequestOptions(
+    onprogress: (progress) {
+      print('Progress: ${progress.progress}/${progress.total}');
+      if (progress.message != null) {
+        print('Status: ${progress.message}');
+      }
+    },
+  ),
+);
 ```
 
 ### Handle Tool Errors
@@ -135,51 +158,6 @@ try {
 }
 ```
 
-### Tool Progress Tracking
-
-```dart
-// Request progress notifications
-// Note: Meta support for progress tokens requires custom request handling currently
-final result = await client.callTool(
-  CallToolRequest(
-    name: 'process-large-file',
-    arguments: {'file': 'large.dat'},
-  ),
-  // Progress token for tracking is currently not supported in CallToolRequest
-  // You would need to construct a custom JsonRpcRequest with meta
-);
-
-// Listen for progress (set up before calling tool)
-client.onProgress = (notification) {
-  if (notification.progressToken == 'progress-123') {
-    print('Progress: ${notification.progress}/${notification.total}');
-  }
-};
-```
-
-### Cancel Tool Execution
-
-```dart
-final progressToken = 'cancel-me-123';
-
-// Start long-running tool
-final future = client.callTool(CallToolRequest(
-  name: 'long-operation',
-  arguments: {},
-  // _meta: {'progressToken': progressToken}, // Not supported in CallToolRequest
-));
-
-// Cancel after 5 seconds
-await Future.delayed(Duration(seconds: 5));
-await client.cancelRequest(progressToken);
-
-// The tool call will be cancelled
-try {
-  await future;
-} catch (e) {
-  print('Tool was cancelled: $e');
-}
-```
 
 ## Reading Resources
 
@@ -194,6 +172,8 @@ for (final resource in response.resources) {
   print('  URI: ${resource.uri}');
   print('  Description: ${resource.description}');
   print('  MIME: ${resource.mimeType}');
+  print('  Last modified: ${resource.annotations?.lastModified}');
+  print('  Icons: ${resource.icons?.length ?? 0}');
 }
 ```
 
@@ -202,7 +182,7 @@ for (final resource in response.resources) {
 ```dart
 // Read specific resource
 final result = await client.readResource(
-  ReadResourceRequestParams(
+  ReadResourceRequest(
     uri: 'file:///docs/readme.md',
   ),
 );
@@ -224,28 +204,34 @@ for (final content in result.contents) {
 ```dart
 // Subscribe to changes
 await client.subscribeResource(
-  SubscribeRequestParams(
+  SubscribeRequest(
     uri: 'file:///data/metrics.json',
   ),
 );
 
 // Listen for updates
-client.onResourceUpdated = (notification) {
-  print('Resource updated: ${notification.uri}');
+client.setNotificationHandler<JsonRpcResourceUpdatedNotification>(
+  Method.notificationsResourcesUpdated,
+  (notification) async {
+    final uri = notification.updatedParams.uri;
+    print('Resource updated: $uri');
 
-  // Re-read the resource
-  client.readResource(
-    ReadResourceRequestParams(
-      uri: notification.uri,
-    ),
-  ).then((result) {
-    print('New content: ${result.contents.first.text}');
-  });
-};
+    // Re-read the resource
+    final result = await client.readResource(
+      ReadResourceRequest(uri: uri),
+    );
+    if (result.contents.isNotEmpty && result.contents.first is TextResourceContents) {
+      print('New content: ${(result.contents.first as TextResourceContents).text}');
+    }
+  },
+  (params, meta) => JsonRpcResourceUpdatedNotification(
+    updatedParams: ResourceUpdatedNotification.fromJson(params ?? {}),
+  ),
+);
 
 // Unsubscribe when done
 await client.unsubscribeResource(
-  UnsubscribeRequestParams(
+  UnsubscribeRequest(
     uri: 'file:///data/metrics.json',
   ),
 );
@@ -266,7 +252,7 @@ for (final resource in response.resources) {
 
 // Read from template
 final result = await client.readResource(
-  ReadResourceRequestParams(
+  ReadResourceRequest(
     uri: 'users://alice/profile',  // Expands template
   ),
 );
@@ -299,7 +285,7 @@ for (final prompt in response.prompts) {
 ```dart
 // Get prompt without arguments
 final result = await client.getPrompt(
-  GetPromptRequestParams(
+  GetPromptRequest(
     name: 'code-review',
   ),
 );
@@ -315,7 +301,7 @@ for (final message in result.messages) {
 ```dart
 // Get prompt with arguments
 final result = await client.getPrompt(
-  GetPromptRequestParams(
+  GetPromptRequest(
     name: 'translate',
     arguments: {
       'target_language': 'Spanish',
@@ -334,7 +320,7 @@ for (final message in result.messages) {
 
 ```dart
 final result = await client.getPrompt(
-  GetPromptRequestParams(
+  GetPromptRequest(
     name: 'analyze-file',
     arguments: {'file_uri': 'file:///data.json'},
   ),
@@ -349,9 +335,15 @@ for (final message in result.messages) {
     // Resolve the embedded resource
     final resourceUri = content.resource.uri;
     final resourceData = await client.readResource(
-      ReadResourceRequestParams(uri: resourceUri),
+      ReadResourceRequest(uri: resourceUri),
     );
     print('Embedded: ${resourceData.contents.first.text}');
+  } else if (content is ResourceLink) {
+    // Follow resource links directly
+    final resourceData = await client.readResource(
+      ReadResourceRequest(uri: content.uri),
+    );
+    print('Linked: ${resourceData.contents.first.text}');
   }
 }
 ```
@@ -361,7 +353,7 @@ for (final message in result.messages) {
 Handle LLM sampling requests from the server (server asking client to use an LLM):
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(
     name: 'my-client',
     version: '1.0.0',
@@ -412,7 +404,7 @@ Get argument completion suggestions:
 ```dart
 // Complete resource template variable
 final result = await client.complete(
-  CompleteRequestParams(
+  CompleteRequest(
     ref: CompletionReference(
       type: CompletionReferenceType.resourceRef,
       uri: 'users://{userId}/profile',
@@ -437,7 +429,7 @@ if (result.completion.hasMore == true) {
 ```dart
 // Complete prompt argument
 final result = await client.complete(
-  CompleteRequestParams(
+  CompleteRequest(
     ref: CompletionReference(
       type: CompletionReferenceType.promptRef,
       name: 'translate',
@@ -460,7 +452,7 @@ for (final lang in result.completion.values) {
 Roots are filesystem locations the client exposes to the server:
 
 ```dart
-final client = Client(
+final client = McpClient(
   Implementation(
     name: 'my-client',
     version: '1.0.0',
@@ -499,7 +491,7 @@ await client.sendRootsListChanged();
 ```dart
 // Set server's logging level
 await client.setLoggingLevel(
-  SetLevelRequestParams(
+  SetLevelRequest(
     level: LoggingLevel.debug,
   ),
 );
@@ -509,13 +501,19 @@ await client.setLoggingLevel(
 
 ```dart
 // Listen for server logs
-client.onLogMessage = (notification) {
-  final level = notification.level;
-  final message = notification.data;
-  final logger = notification.logger ?? 'server';
+client.setNotificationHandler<JsonRpcLoggingMessageNotification>(
+  Method.notificationsMessage,
+  (notification) async {
+    final level = notification.logParams.level;
+    final message = notification.logParams.data;
+    final logger = notification.logParams.logger ?? 'server';
 
-  print('[$level] $logger: $message');
-};
+    print('[$level] $logger: $message');
+  },
+  (params, meta) => JsonRpcLoggingMessageNotification(
+    logParams: LoggingMessageNotification.fromJson(params ?? {}),
+  ),
+);
 ```
 
 ## Advanced Topics
@@ -538,7 +536,7 @@ await client.close();
 ### Reconnection Logic
 
 ```dart
-Future<void> connectWithRetry(Client client, Transport transport) async {
+Future<void> connectWithRetry(McpClient client, Transport transport) async {
   var retries = 0;
   const maxRetries = 3;
 
@@ -608,7 +606,7 @@ print('  ${prompts.prompts.length} prompts');
 
 ```dart
 Future<CallToolResult?> callToolSafely(
-  Client client,
+  McpClient client,
   String toolName,
   Map<String, dynamic> args,
 ) async {
@@ -641,44 +639,6 @@ Future<CallToolResult?> callToolSafely(
 }
 ```
 
-### Notification Handlers
-
-```dart
-// Set up all notification handlers
-void setupNotifications(Client client) {
-  // Resource updates
-  client.onResourceUpdated = (notification) {
-    print('Resource updated: ${notification.uri}');
-  };
-
-  client.onResourceListChanged = () {
-    print('Resource list changed');
-    // Re-fetch resource list
-  };
-
-  // Tool updates
-  client.onToolListChanged = () {
-    print('Tool list changed');
-    // Re-fetch tool list
-  };
-
-  // Prompt updates
-  client.onPromptListChanged = () {
-    print('Prompt list changed');
-    // Re-fetch prompt list
-  };
-
-  // Progress
-  client.onProgress = (notification) {
-    print('Progress: ${notification.progress}/${notification.total}');
-  };
-
-  // Logging
-  client.onLogMessage = (notification) {
-    print('[${notification.level}] ${notification.data}');
-  };
-}
-```
 
 ### Timeout Handling
 
@@ -704,7 +664,7 @@ try {
 
 ```dart
 Future<void> useClient() async {
-  final client = Client(
+  final client = McpClient(
     Implementation(name: 'client', version: '1.0.0'),
   );
 
@@ -751,44 +711,16 @@ processResult(result);
 ```dart
 // ✅ Good
 if (client.serverCapabilities?.resources?.subscribe == true) {
-  await client.subscribeResource(SubscribeRequestParams(uri: uri));
+  await client.subscribeResource(SubscribeRequest(uri: uri));
 } else {
   // Fallback: poll for changes
   pollResourceForChanges(uri);
 }
 
 // ❌ Bad - assume capability exists
-await client.subscribeResource(SubscribeRequestParams(uri: uri));
+await client.subscribeResource(SubscribeRequest(uri: uri));
 ```
 
-### 4. Use Progress for Long Operations
-
-```dart
-// ✅ Good - track progress
-final progressToken = 'progress-${DateTime.now().millisecondsSinceEpoch}';
-
-client.onProgress = (notification) {
-  if (notification.progressToken == progressToken) {
-    updateUI(notification.progress, notification.total);
-  }
-};
-
-await client.callTool(
-  CallToolRequest(
-    name: 'long-task',
-    arguments: {},
-    // _meta: {'progressToken': progressToken}, // Meta not supported currently
-  ),
-);
-
-// ❌ Bad - no feedback for user
-await client.callTool(
-  CallToolRequest(
-    name: 'long-task',
-    arguments: {},
-  ),
-);
-```
 
 ### 5. Resource Subscription Management
 
@@ -798,14 +730,14 @@ final subscriptions = <String>{};
 
 Future<void> subscribe(String uri) async {
   if (!subscriptions.contains(uri)) {
-    await client.subscribeResource(SubscribeRequestParams(uri: uri));
+    await client.subscribeResource(SubscribeRequest(uri: uri));
     subscriptions.add(uri);
   }
 }
 
 Future<void> unsubscribe(String uri) async {
   if (subscriptions.contains(uri)) {
-    await client.unsubscribeResource(UnsubscribeRequestParams(uri: uri));
+    await client.unsubscribeResource(UnsubscribeRequest(uri: uri));
     subscriptions.remove(uri);
   }
 }
@@ -814,7 +746,7 @@ Future<void> unsubscribe(String uri) async {
 Future<void> cleanUp() async {
   await Future.wait(
     subscriptions.map((uri) =>
-      client.unsubscribeResource(UnsubscribeRequestParams(uri: uri)),
+      client.unsubscribeResource(UnsubscribeRequest(uri: uri)),
     ),
   );
   subscriptions.clear();

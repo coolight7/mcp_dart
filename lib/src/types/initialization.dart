@@ -311,12 +311,19 @@ class ClientCapabilities {
   /// Present if the client supports tasks (`tasks/list`, `tasks/requests`, etc).
   final ClientCapabilitiesTasks? tasks;
 
+  /// Optional MCP extension capabilities (SEP-1724).
+  ///
+  /// Keys are extension identifiers (e.g. `"io.modelcontextprotocol/ui"`),
+  /// values are extension-specific settings.
+  final Map<String, Map<String, dynamic>>? extensions;
+
   const ClientCapabilities({
     this.experimental,
     this.sampling,
     this.roots,
     this.elicitation,
     this.tasks,
+    this.extensions,
   });
 
   factory ClientCapabilities.fromJson(Map<String, dynamic> json) {
@@ -324,6 +331,7 @@ class ClientCapabilities {
     final elicitationMap = json['elicitation'] as Map<String, dynamic>?;
     final tasksMap = json['tasks'] as Map<String, dynamic>?;
     final samplingMap = json['sampling'] as Map<String, dynamic>?;
+    final extensionsMap = json['extensions'] as Map<String, dynamic>?;
 
     return ClientCapabilities(
       experimental: json['experimental'] as Map<String, dynamic>?,
@@ -337,6 +345,9 @@ class ClientCapabilities {
           : ClientElicitation.fromJson(elicitationMap),
       tasks:
           tasksMap == null ? null : ClientCapabilitiesTasks.fromJson(tasksMap),
+      extensions: extensionsMap?.map(
+        (key, value) => MapEntry(key, Map<String, dynamic>.from(value as Map)),
+      ),
     );
   }
 
@@ -346,11 +357,12 @@ class ClientCapabilities {
         if (roots != null) 'roots': roots!.toJson(),
         if (elicitation != null) 'elicitation': elicitation!.toJson(),
         if (tasks != null) 'tasks': tasks!.toJson(),
+        if (extensions != null) 'extensions': extensions,
       };
 }
 
 /// Parameters for the `initialize` request.
-class InitializeRequestParams {
+class InitializeRequest {
   /// The latest protocol version the client supports.
   final String protocolVersion;
 
@@ -360,14 +372,14 @@ class InitializeRequestParams {
   /// Information about the client implementation.
   final Implementation clientInfo;
 
-  const InitializeRequestParams({
+  const InitializeRequest({
     required this.protocolVersion,
     required this.capabilities,
     required this.clientInfo,
   });
 
-  factory InitializeRequestParams.fromJson(Map<String, dynamic> json) =>
-      InitializeRequestParams(
+  factory InitializeRequest.fromJson(Map<String, dynamic> json) =>
+      InitializeRequest(
         protocolVersion: json['protocolVersion'] as String,
         capabilities: ClientCapabilities.fromJson(
           json['capabilities'] as Map<String, dynamic>,
@@ -387,7 +399,7 @@ class InitializeRequestParams {
 /// Request sent from client to server upon connection to begin initialization.
 class JsonRpcInitializeRequest extends JsonRpcRequest {
   /// The initialization parameters.
-  final InitializeRequestParams initParams;
+  final InitializeRequest initParams;
 
   JsonRpcInitializeRequest({
     required super.id,
@@ -403,7 +415,7 @@ class JsonRpcInitializeRequest extends JsonRpcRequest {
     final meta = paramsMap['_meta'] as Map<String, dynamic>?;
     return JsonRpcInitializeRequest(
       id: json['id'],
-      initParams: InitializeRequestParams.fromJson(paramsMap),
+      initParams: InitializeRequest.fromJson(paramsMap),
       meta: meta,
     );
   }
@@ -607,6 +619,12 @@ class ServerCapabilities {
   /// Present if the server offers elicitation (`elicitation/create`).
   final ServerCapabilitiesElicitation? elicitation;
 
+  /// Optional MCP extension capabilities (SEP-1724).
+  ///
+  /// Keys are extension identifiers (e.g. `"io.modelcontextprotocol/ui"`),
+  /// values are extension-specific settings.
+  final Map<String, Map<String, dynamic>>? extensions;
+
   const ServerCapabilities({
     this.experimental,
     this.logging,
@@ -616,6 +634,7 @@ class ServerCapabilities {
     this.completions,
     this.tasks,
     this.elicitation,
+    this.extensions,
   });
 
   factory ServerCapabilities.fromJson(Map<String, dynamic> json) {
@@ -625,6 +644,7 @@ class ServerCapabilities {
     final tMap = json['tools'] as Map<String, dynamic>?;
     final tasksMap = json['tasks'] as Map<String, dynamic>?;
     final elicitationMap = json['elicitation'] as Map<String, dynamic>?;
+    final extensionsMap = json['extensions'] as Map<String, dynamic>?;
 
     return ServerCapabilities(
       experimental: json['experimental'] as Map<String, dynamic>?,
@@ -640,6 +660,9 @@ class ServerCapabilities {
       elicitation: elicitationMap == null
           ? null
           : ServerCapabilitiesElicitation.fromJson(elicitationMap),
+      extensions: extensionsMap?.map(
+        (key, value) => MapEntry(key, Map<String, dynamic>.from(value as Map)),
+      ),
     );
   }
 
@@ -652,6 +675,7 @@ class ServerCapabilities {
         if (completions != null) 'completions': completions!.toJson(),
         if (tasks != null) 'tasks': tasks!.toJson(),
         if (elicitation != null) 'elicitation': elicitation!.toJson(),
+        if (extensions != null) 'extensions': extensions,
       };
 }
 
@@ -713,3 +737,7 @@ class JsonRpcInitializedNotification extends JsonRpcNotification {
   factory JsonRpcInitializedNotification.fromJson(Map<String, dynamic> json) =>
       const JsonRpcInitializedNotification();
 }
+
+/// Deprecated alias for [InitializeRequest].
+@Deprecated('Use InitializeRequest instead')
+typedef InitializeRequestParams = InitializeRequest;

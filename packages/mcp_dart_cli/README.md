@@ -13,8 +13,17 @@ dart pub global activate mcp_dart_cli
 ### Create a new project
 
 ```bash
-mcp_dart create <project_name>
+mcp_dart create <project_name> [directory]
 ```
+
+Or simply specify the directory and let the CLI infer the project name:
+
+```bash
+mcp_dart create path/to/my_project
+```
+
+If `directory` is omitted, the project will be created in the current directory with the name `<project_name>`.
+
 
 ### Create from a specific template
 
@@ -43,6 +52,7 @@ mcp_dart create <project_name> --template https://github.com/leehack/mcp_dart/tr
 - `serve`: Runs the MCP server in the current directory.
 - `doctor`: Checks the project for common issues and verifies connectivity.
 - `inspect`: Interacts with an MCP server (local or external).
+- `update`: Updates the CLI to the latest version.
 
 ### Doctor
 
@@ -127,6 +137,14 @@ mcp_dart serve
 - `--host`: Host for HTTP transport. Defaults to `0.0.0.0`.
 - `--port` (`-p`): Port for HTTP transport. Defaults to `3000`.
 - `--watch`: Restart the server on file changes.
+
+### Update
+
+Updates the CLI to the latest version.
+
+```bash
+mcp_dart update
+```
 
 ## Running Tests
 

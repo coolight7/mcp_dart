@@ -21,7 +21,7 @@ typedef ToolOutputSchema = JsonObject;
 /// received from untrusted servers.
 class ToolAnnotations {
   /// A human-readable title for the tool.
-  final String title;
+  final String? title;
 
   /// If true, the tool does not modify its environment.
   /// default: false
@@ -53,7 +53,7 @@ class ToolAnnotations {
   final List<String>? audience;
 
   const ToolAnnotations({
-    required this.title,
+    this.title,
     this.readOnlyHint = false,
     this.destructiveHint = true,
     this.idempotentHint = false,
@@ -64,7 +64,7 @@ class ToolAnnotations {
 
   factory ToolAnnotations.fromJson(Map<String, dynamic> json) {
     return ToolAnnotations(
-      title: json['title'] as String,
+      title: json['title'] as String?,
       readOnlyHint: json['readOnlyHint'] as bool? ?? false,
       destructiveHint: json['destructiveHint'] as bool? ?? true,
       idempotentHint: json['idempotentHint'] as bool? ?? false,
@@ -133,6 +133,9 @@ class Tool {
   /// Optional icon content.
   final ImageContent? icon;
 
+  /// Optional set of icons.
+  final List<McpIcon>? icons;
+
   const Tool({
     required this.name,
     this.description,
@@ -142,6 +145,7 @@ class Tool {
     this.meta,
     this.execution,
     this.icon,
+    this.icons,
   });
 
   factory Tool.fromJson(Map<String, dynamic> json) {
@@ -166,6 +170,9 @@ class Tool {
       icon: json['icon'] != null
           ? ImageContent.fromJson(json['icon'] as Map<String, dynamic>)
           : null,
+      icons: (json['icons'] as List<dynamic>?)
+          ?.map((e) => McpIcon.fromJson(e as Map<String, dynamic>))
+          .toList(),
     );
   }
 
@@ -178,6 +185,8 @@ class Tool {
         if (meta != null) '_meta': meta,
         if (execution != null) 'execution': execution!.toJson(),
         if (icon != null) 'icon': icon!.toJson(),
+        if (icons != null)
+          'icons': icons!.map((icon) => icon.toJson()).toList(),
       };
 }
 

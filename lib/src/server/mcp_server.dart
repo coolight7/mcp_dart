@@ -16,6 +16,28 @@ final _logger = Logger("mcp_dart.server.mcp");
 /// Callback capable of providing completions for a partial value.
 typedef CompleteCallback = FutureOr<List<String>> Function(String value);
 
+IconTheme? _iconThemeFromString(String? theme) {
+  return switch (theme) {
+    'light' => IconTheme.light,
+    'dark' => IconTheme.dark,
+    _ => null,
+  };
+}
+
+List<McpIcon>? _iconsFromLegacyImage(ImageContent? image) {
+  if (image == null) {
+    return null;
+  }
+
+  return [
+    McpIcon(
+      src: 'data:${image.mimeType};base64,${image.data}',
+      mimeType: image.mimeType,
+      theme: _iconThemeFromString(image.theme),
+    ),
+  ];
+}
+
 /// Definition for a completable argument.
 class CompletableDef {
   /// The callback to invoke to get completion suggestions.
@@ -235,6 +257,7 @@ class _RegisteredResourceImpl implements RegisteredResource {
       description: metadata?.description,
       mimeType: metadata?.mimeType,
       icon: icon,
+      icons: _iconsFromLegacyImage(icon),
       annotations: title != null ? ResourceAnnotations(title: title) : null,
     );
   }
@@ -478,7 +501,9 @@ class _RegisteredToolImpl implements RegisteredTool {
       outputSchema: outputSchema,
       annotations: annotations,
       icon: icon,
+      icons: _iconsFromLegacyImage(icon),
       execution: execution,
+      meta: meta,
     );
   }
 
@@ -603,6 +628,7 @@ class _RegisteredPromptImpl implements RegisteredPrompt {
       description: description,
       arguments: promptArgs,
       icon: icon,
+      icons: _iconsFromLegacyImage(icon),
     );
   }
 
@@ -685,7 +711,7 @@ class ExperimentalMcpServerTasks {
   /// Sends an `elicitation/create` request associated with a specific task.
   Future<ElicitResult> elicitForTask(
     String taskId,
-    ElicitRequestParams params, [
+    ElicitRequest params, [
     RequestOptions? options,
   ]) {
     final req = JsonRpcElicitRequest(
@@ -705,7 +731,7 @@ class ExperimentalMcpServerTasks {
   /// Sends a `sampling/createMessage` request associated with a specific task.
   Future<CreateMessageResult> createMessageForTask(
     String taskId,
-    CreateMessageRequestParams params, [
+    CreateMessageRequest params, [
     RequestOptions? options,
   ]) {
     final req = JsonRpcCreateMessageRequest(
@@ -779,7 +805,7 @@ class McpServer {
       _experimental ??= ExperimentalMcpServerTasks(this);
 
   /// Creates an [McpServer] instance.
-  McpServer(Implementation serverInfo, {ServerOptions? options}) {
+  McpServer(Implementation serverInfo, {McpServerOptions? options}) {
     // ignore: deprecated_member_use_from_same_package
     server = Server(serverInfo, options: options);
   }
@@ -799,7 +825,7 @@ class McpServer {
 
   /// Sends a logging message to the client, if connected.
   Future<void> sendLoggingMessage(
-    LoggingMessageNotificationParams params, {
+    LoggingMessageNotification params, {
     String? sessionId,
   }) async {
     return server.sendLoggingMessage(params, sessionId: sessionId);
@@ -1711,7 +1737,7 @@ class McpServer {
 
   /// Requests structured user input from the client using form mode.
   Future<ElicitResult> elicitInput(
-    ElicitRequestParams params, [
+    ElicitRequest params, [
     RequestOptions? options,
   ]) async {
     return server.elicitInput(params, options);

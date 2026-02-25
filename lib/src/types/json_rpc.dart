@@ -125,8 +125,13 @@ sealed class JsonRpcMessage {
           Method.tasksCancel => JsonRpcCancelTaskRequest.fromJson(json),
           Method.tasksGet => JsonRpcGetTaskRequest.fromJson(json),
           Method.tasksResult => JsonRpcTaskResultRequest.fromJson(json),
-          _ => throw UnimplementedError(
-              "fromJson for request method '$method' not implemented",
+          _ => JsonRpcRequest(
+              id: id,
+              method: method,
+              params: json['params'] as Map<String, dynamic>?,
+              meta: json['_meta'] as Map<String, dynamic>? ??
+                  (json['params'] as Map<String, dynamic>?)?['_meta']
+                      as Map<String, dynamic>?,
             ),
         };
       } else {
@@ -160,8 +165,12 @@ sealed class JsonRpcMessage {
             JsonRpcTaskStatusNotification.fromJson(json),
           Method.notificationsElicitationComplete =>
             JsonRpcElicitationCompleteNotification.fromJson(json),
-          _ => throw UnimplementedError(
-              "fromJson for notification method '$method' not implemented",
+          _ => JsonRpcNotification(
+              method: method,
+              params: json['params'] as Map<String, dynamic>?,
+              meta: json['_meta'] as Map<String, dynamic>? ??
+                  (json['params'] as Map<String, dynamic>?)?['_meta']
+                      as Map<String, dynamic>?,
             ),
         };
       }
@@ -379,7 +388,7 @@ class JsonRpcListToolsRequest extends JsonRpcRequest {
   )
   factory JsonRpcListToolsRequest.fromListParams({
     required RequestId id,
-    ListToolsRequestParams? params,
+    ListToolsRequest? params,
     Map<String, dynamic>? meta,
   }) {
     return JsonRpcListToolsRequest(
@@ -397,9 +406,13 @@ class JsonRpcListToolsRequest extends JsonRpcRequest {
     );
   }
 
-  ListToolsRequest get listParams => params != null
-      ? ListToolsRequest.fromJson(params!)
-      : const ListToolsRequest();
+  ListToolsRequest get listParams {
+    final requestParams = params;
+    if (requestParams == null) {
+      return const ListToolsRequest();
+    }
+    return ListToolsRequest.fromJson(requestParams);
+  }
 }
 
 /// JSON-RPC request to call a tool.
@@ -420,7 +433,13 @@ class JsonRpcCallToolRequest extends JsonRpcRequest {
     );
   }
 
-  CallToolRequest get callParams => CallToolRequest.fromJson(params!);
+  CallToolRequest get callParams {
+    final requestParams = params;
+    if (requestParams == null) {
+      throw const FormatException('Missing params for call tool request');
+    }
+    return CallToolRequest.fromJson(requestParams);
+  }
 
   bool get isTaskAugmented {
     // Check for task augmentation in meta or params as per convention
@@ -429,10 +448,10 @@ class JsonRpcCallToolRequest extends JsonRpcRequest {
         params?.containsKey('task') == true;
   }
 
-  TaskCreationParams? get taskParams {
+  TaskCreation? get taskParams {
     final taskMap = meta?['task'] ?? params?['task'];
     if (taskMap is Map<String, dynamic>) {
-      return TaskCreationParams.fromJson(taskMap);
+      return TaskCreation.fromJson(taskMap);
     }
     return null;
   }

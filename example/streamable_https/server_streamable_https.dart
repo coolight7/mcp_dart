@@ -110,7 +110,7 @@ McpServer getServer() {
       // Send debug notification
       await extra.sendNotification(
         JsonRpcLoggingMessageNotification(
-          logParams: LoggingMessageNotificationParams(
+          logParams: LoggingMessageNotification(
             level: LoggingLevel.debug,
             data: 'Starting multi-greet for $name',
           ),
@@ -122,7 +122,7 @@ McpServer getServer() {
       // Send first info notification
       await extra.sendNotification(
         JsonRpcLoggingMessageNotification(
-          logParams: LoggingMessageNotificationParams(
+          logParams: LoggingMessageNotification(
             level: LoggingLevel.info,
             data: 'Sending first greeting to $name',
           ),
@@ -134,7 +134,7 @@ McpServer getServer() {
       // Send second info notification
       await extra.sendNotification(
         JsonRpcLoggingMessageNotification(
-          logParams: LoggingMessageNotificationParams(
+          logParams: LoggingMessageNotification(
             level: LoggingLevel.info,
             data: 'Sending second greeting to $name',
           ),
@@ -206,7 +206,7 @@ McpServer getServer() {
         try {
           await extra.sendNotification(
             JsonRpcLoggingMessageNotification(
-              logParams: LoggingMessageNotificationParams(
+              logParams: LoggingMessageNotification(
                 level: LoggingLevel.info,
                 data:
                     'Periodic notification #$counter at ${DateTime.now().toIso8601String()}',
@@ -252,17 +252,21 @@ McpServer getServer() {
   return server;
 }
 
-void setCorsHeaders(HttpResponse response) {
-  response.headers.set('Access-Control-Allow-Origin', '*'); // Allow any origin
-  response.headers
+void setCorsHeaders(HttpRequest request) {
+  // Echo the Origin header to support Allow-Credentials
+  final origin = request.headers.value('Origin') ?? '*';
+  request.response.headers
+      .set('Access-Control-Allow-Origin', origin); // Allow the specific origin
+  request.response.headers
       .set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  response.headers.set(
+  request.response.headers.set(
     'Access-Control-Allow-Headers',
     'Origin, X-Requested-With, Content-Type, Accept, mcp-session-id, Last-Event-ID, Authorization',
   );
-  response.headers.set('Access-Control-Allow-Credentials', 'true');
-  response.headers.set('Access-Control-Max-Age', '86400'); // 24 hours
-  response.headers.set('Access-Control-Expose-Headers', 'mcp-session-id');
+  request.response.headers.set('Access-Control-Allow-Credentials', 'true');
+  request.response.headers.set('Access-Control-Max-Age', '86400'); // 24 hours
+  request.response.headers
+      .set('Access-Control-Expose-Headers', 'mcp-session-id');
 }
 
 void main() async {
@@ -278,7 +282,7 @@ void main() async {
   await for (final request in server) {
     ++reqHit;
     // Apply CORS headers to all responses
-    setCorsHeaders(request.response);
+    setCorsHeaders(request);
 
     if (request.method == 'OPTIONS') {
       // Handle CORS preflight request
@@ -411,7 +415,7 @@ Future<void> handlePostRequest(
         ..statusCode = HttpStatus.badRequest
         ..headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       // Apply CORS headers to this specific response
-      setCorsHeaders(request.response);
+      setCorsHeaders(request);
       request.response.write(
         jsonEncode(
           JsonRpcError(
@@ -447,7 +451,7 @@ Future<void> handlePostRequest(
         ..statusCode = HttpStatus.internalServerError
         ..headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       // Apply CORS headers
-      setCorsHeaders(request.response);
+      setCorsHeaders(request);
       request.response.write(
         jsonEncode(
           JsonRpcError(
@@ -473,7 +477,7 @@ Future<void> handleGetRequest(
   if (sessionId == null || !transports.containsKey(sessionId)) {
     request.response.statusCode = HttpStatus.badRequest;
     // Apply CORS headers
-    setCorsHeaders(request.response);
+    setCorsHeaders(request);
     request.response
       ..write('Invalid or missing session ID')
       ..close();
@@ -501,7 +505,7 @@ Future<void> handleDeleteRequest(
   if (sessionId == null || !transports.containsKey(sessionId)) {
     request.response.statusCode = HttpStatus.badRequest;
     // Apply CORS headers
-    setCorsHeaders(request.response);
+    setCorsHeaders(request);
     request.response
       ..write('Invalid or missing session ID')
       ..close();
@@ -528,7 +532,7 @@ Future<void> handleDeleteRequest(
     if (!headersSent) {
       request.response.statusCode = HttpStatus.internalServerError;
       // Apply CORS headers
-      setCorsHeaders(request.response);
+      setCorsHeaders(request);
       request.response
         ..write('Error processing session termination')
         ..close();

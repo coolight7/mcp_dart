@@ -44,7 +44,7 @@ class InteractiveServer {
 
     final server = McpServer(
       const Implementation(name: 'simple-task-interactive', version: '1.0.0'),
-      options: const ServerOptions(
+      options: const McpServerOptions(
         capabilities: ServerCapabilities(
           tools: ServerCapabilitiesTools(),
           tasks: ServerCapabilitiesTasks(listChanged: true),
@@ -145,6 +145,21 @@ class InteractiveServer {
     print('Starting server on http://localhost:8000/mcp');
 
     await for (final httpRequest in httpServer) {
+      // Add CORS headers
+      httpRequest.response.headers.add('Access-Control-Allow-Origin', '*');
+      httpRequest.response.headers
+          .add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      httpRequest.response.headers
+          .add('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id');
+      httpRequest.response.headers
+          .add('Access-Control-Expose-Headers', 'mcp-session-id');
+
+      if (httpRequest.method == 'OPTIONS') {
+        httpRequest.response.statusCode = 200;
+        httpRequest.response.close();
+        continue;
+      }
+
       if (httpRequest.method == 'POST' && httpRequest.uri.path == '/mcp') {
         await _handlePost(httpRequest);
       } else if (httpRequest.method == 'GET' &&
@@ -258,6 +273,8 @@ class InteractiveServer {
     }
 
     final body = await utf8.decodeStream(req);
+    print('[Server] Received POST body: $body');
+    print('[Server] Headers: ${req.headers}');
     final json = jsonDecode(body) as Map<String, dynamic>;
 
     if (json['method'] == 'initialize') {
@@ -331,7 +348,7 @@ class SimpleToolTaskHandler implements ToolTaskHandler {
     RequestHandlerExtra? extra,
   ) async {
     final task = await context.store.createTask(
-      const TaskCreationParams(), // ttl
+      const TaskCreation(), // ttl
       extra?.requestId ?? -1,
       {'name': toolName, 'input': args ?? {}},
       extra?.sessionId,
