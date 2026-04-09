@@ -9,6 +9,7 @@ Complete guide to building MCP servers with the Dart SDK.
 - [Registering Tools](#registering-tools)
 - [Providing Resources](#providing-resources)
 - [Creating Prompts](#creating-prompts)
+- [MCP Apps Metadata](#mcp-apps-metadata)
 - [Task Management](#task-management)
 - [Handling Client Requests](#handling-client-requests)
 - [Server Lifecycle](#server-lifecycle)
@@ -107,6 +108,56 @@ server.registerPrompt(name: 'my-prompt', ...);
 // - listChanged: true (server can notify of prompt list changes)
 ```
 
+## MCP Apps Metadata
+
+Use TypeScript-style helper APIs to register app tools/resources with `_meta.ui`.
+
+```dart
+const resourceUri = 'ui://dashboard/view.html';
+
+registerAppTool(
+  server,
+  'dashboard_show',
+  McpUiAppToolConfig(
+    meta: const {
+      'ui': {
+        'resourceUri': resourceUri,
+      },
+    },
+  ),
+  (args, extra) async => const CallToolResult(
+    content: [TextContent(text: 'ok')],
+  ),
+);
+
+registerAppResource(
+  server,
+  'Dashboard UI',
+  resourceUri,
+  const McpUiAppResourceConfig(
+    meta: {
+      'ui': {
+        'prefersBorder': true,
+      },
+    },
+  ),
+  (uri, extra) async => ReadResourceResult(
+    contents: [
+      TextResourceContents(
+        uri: uri.toString(),
+        mimeType: mcpUiResourceMimeType,
+        text: '<!doctype html><html></html>',
+        meta: const McpUiResourceMeta(
+          prefersBorder: true,
+        ).toMeta(),
+      ),
+    ],
+  ),
+);
+```
+
+For a complete example, see [MCP Apps guide](mcp-apps.md).
+
 ## Registering Tools
 
 Tools allow clients to execute actions through your server.
@@ -125,7 +176,7 @@ server.registerTool(
   ),
   callback: (args, extra) async {
     final message = args['message'] as String;
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: message)],
     );
   },
@@ -167,7 +218,7 @@ server.registerTool(
       limit: limit,
     );
 
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [
         TextContent(
           text: jsonEncode(results),
@@ -213,7 +264,7 @@ server.registerTool(
   inputSchema: ToolInputSchema(properties: {}),
   callback: (args, extra) async {
     // Delete logic
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: 'User deleted')],
     );
   },
@@ -225,7 +276,7 @@ server.registerTool(
   inputSchema: ToolInputSchema(properties: {}),
   callback: (args, extra) async {
     // Get logic
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: 'User info')],
     );
   },
@@ -237,7 +288,7 @@ server.registerTool(
   inputSchema: ToolInputSchema(properties: {}),
   callback: (args, extra) async {
     // Update logic
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: 'Cache updated')],
     );
   },
@@ -249,7 +300,7 @@ server.registerTool(
   inputSchema: ToolInputSchema(properties: {}),
   callback: (args, extra) async {
     // Search logic
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: 'Results')],
     );
   },
@@ -267,7 +318,7 @@ server.registerTool(
     final report = await generateReport(args);
     final chart = await generateChart(report);
 
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [
         TextContent(text: report.summary),
         ImageContent(
@@ -288,7 +339,7 @@ server.registerTool(
   description: 'Return a link to the latest generated report',
   inputSchema: ToolInputSchema(properties: {}),
   callback: (args, extra) async {
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [
         TextContent(text: 'Latest report is available.'),
         ResourceLink(
@@ -321,7 +372,7 @@ server.registerTool(
 
     if (b == 0) {
       // Return error content
-      return CallToolResult.fromContent(
+      return CallToolResult(
         isError: true,
         content: [
           TextContent(text: 'Error: Division by zero'),
@@ -329,7 +380,7 @@ server.registerTool(
       );
     }
 
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: '${a / b}')],
     );
   },
@@ -701,7 +752,7 @@ server.experimental.onGetTask((taskId, extra) async {
 
 server.experimental.onTaskResult((taskId, extra) async {
   // Return the task result
-  return CallToolResult.fromContent(
+  return CallToolResult(
     content: [TextContent(text: 'Result')],
   );
 });

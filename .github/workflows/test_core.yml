@@ -39,6 +39,9 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
+      - name: Run interop test suite
+        run: dart test -t interop
+
       - name: Running tests with coverage
         run: |
           dart pub global activate coverage
@@ -66,6 +69,7 @@ jobs:
           echo "✓ Package achieves perfect 160/160 score"
 
       - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

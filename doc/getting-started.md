@@ -8,7 +8,7 @@ Add the MCP Dart SDK to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mcp_dart: ^1.3.0
+  mcp_dart: ^2.1.0
 ```
 
 Then run:
@@ -129,6 +129,62 @@ How clients and servers communicate:
 - **HTTP/SSE**: Web-based (Server-Sent Events)
 - **Stream**: In-process communication
 
+## SDK Runtime Logging
+
+The SDK emits internal runtime logs (for example transport/protocol diagnostics).
+These logs are separate from MCP protocol logging messages (`logging/setLevel`
+and `notifications/message`).
+
+By default:
+
+- **Dart VM/Flutter**: Logs are written to `stderr`
+- **Web**: Logs are written to browser console (`print`)
+
+### Integrate with `package:logging`
+
+If your app does not already depend on `package:logging`, add it first:
+
+```yaml
+dependencies:
+  logging: ^1.2.0
+```
+
+Use import aliases to avoid `Logger` name collisions:
+
+```dart
+import 'package:logging/logging.dart' as app_log;
+import 'package:mcp_dart/mcp_dart.dart' as mcp;
+
+void configureMcpLogging() {
+  final appLogger = app_log.Logger('my_app.mcp');
+
+  mcp.setMcpLogHandler((loggerName, level, message) {
+    final appLevel = switch (level) {
+      mcp.LogLevel.debug => app_log.Level.FINE,
+      mcp.LogLevel.info => app_log.Level.INFO,
+      mcp.LogLevel.warn => app_log.Level.WARNING,
+      mcp.LogLevel.error => app_log.Level.SEVERE,
+    };
+
+    appLogger.log(appLevel, '[$loggerName] $message');
+  });
+}
+```
+
+### Silence or reset SDK logs
+
+```dart
+import 'package:mcp_dart/mcp_dart.dart' as mcp;
+
+void main() {
+  // Turn off internal SDK logs.
+  mcp.silenceMcpLogs();
+
+  // ... later, restore default behavior (stderr on VM, console on web).
+  mcp.resetMcpLogHandler();
+}
+```
+
 ## Your First MCP Server
 
 Create a file `my_server.dart`:
@@ -163,7 +219,7 @@ void main() async {
     ),
     callback: (args, extra) async {
       final name = args['name'] as String;
-      return CallToolResult.fromContent(
+      return CallToolResult(
         content: [
           TextContent(text: 'Hello, $name! Welcome to MCP!'),
         ],
@@ -295,6 +351,7 @@ Done!
 
 - [Server Guide](server-guide.md) - Comprehensive server development guide
 - [Tools](tools.md) - Building powerful tools with validation
+- [MCP Apps](mcp-apps.md) - TypeScript-style `registerAppTool` / `registerAppResource` helpers
 
 ### Learn More About Clients
 
@@ -461,7 +518,7 @@ The SDK includes many examples in the `example/` directory:
 - **[server_stdio.dart](../example/server_stdio.dart)** - Complete stdio server
 - **[client_stdio.dart](../example/client_stdio.dart)** - Stdio client
 - **[weather.dart](../example/weather.dart)** - Real weather API integration
-- **[oauth_server_example.dart](../example/oauth_server_example.dart)** - OAuth2 server
+- **[oauth_server_example.dart](../example/authentication/oauth_server_example.dart)** - OAuth2 server
 - **[completions_capability_demo.dart](../example/completions_capability_demo.dart)** - Auto-completion
 - **[elicitation_http_server.dart](../example/elicitation_http_server.dart)** - User input collection
 

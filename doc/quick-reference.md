@@ -7,7 +7,7 @@ Fast lookup guide for common MCP Dart SDK operations.
 ```yaml
 # pubspec.yaml
 dependencies:
-  mcp_dart: ^1.3.0
+  mcp_dart: ^2.1.0
 ```
 
 ```bash
@@ -67,6 +67,9 @@ final transport = StreamableHTTPServerTransport(
     enableDnsRebindingProtection: true,
     allowedHosts: {'localhost'},
     allowedOrigins: {'http://localhost:5173'},
+    // Defaults are strict; set to false only for compatibility rollouts.
+    strictProtocolVersionHeaderValidation: true,
+    rejectBatchJsonRpcPayloads: true,
   ),
 );
 
@@ -87,7 +90,7 @@ server.registerTool(
     required: ['param'],
   ),
   callback: (args, extra) async {
-    return CallToolResult.fromContent(
+    return CallToolResult(
       content: [TextContent(text: 'result')],
     );
   },
@@ -137,6 +140,50 @@ server.registerResourceTemplate(
       ],
     );
   },
+);
+```
+
+### MCP Apps Metadata
+
+```dart
+const resourceUri = 'ui://dashboard/view.html';
+
+registerAppTool(
+  server,
+  'dashboard_show',
+  McpUiAppToolConfig(
+    meta: const {
+      'ui': {
+        'resourceUri': resourceUri,
+      },
+    },
+  ),
+  (args, extra) async => const CallToolResult(
+    content: [TextContent(text: 'ok')],
+  ),
+);
+
+registerAppResource(
+  server,
+  'Dashboard UI',
+  resourceUri,
+  const McpUiAppResourceConfig(
+    meta: {
+      'ui': {
+        'prefersBorder': true,
+      },
+    },
+  ),
+  (uri, extra) async => ReadResourceResult(
+    contents: [
+      TextResourceContents(
+        uri: uri.toString(),
+        mimeType: mcpUiResourceMimeType,
+        text: '<!doctype html><html></html>',
+        meta: const McpUiResourceMeta(prefersBorder: true).toMeta(),
+      ),
+    ],
+  ),
 );
 ```
 
@@ -586,11 +633,13 @@ final server = McpServer(
 ```dart
 final client = McpClient(
   Implementation(name: 'client', version: '1.0.0'),
-  capabilities: ClientCapabilities(
-    sampling: ClientCapabilitiesSampling(tools: true),
-    roots: ClientCapabilitiesRoots(listChanged: true),
-    elicitation: ClientElicitation(
-      form: ClientElicitationForm(applyDefaults: true),
+  options: McpClientOptions(
+    capabilities: ClientCapabilities(
+      sampling: ClientCapabilitiesSampling(tools: true),
+      roots: ClientCapabilitiesRoots(listChanged: true),
+      elicitation: ClientElicitation(
+        form: ClientElicitationForm(applyDefaults: true),
+      ),
     ),
   ),
 );
@@ -631,6 +680,31 @@ client.setNotificationHandler<JsonRpcLoggingMessageNotification>(
     logParams: LoggingMessageNotification.fromJson(params ?? {}),
   ),
 );
+```
+
+### SDK Runtime Logs (Internal)
+
+```dart
+import 'package:logging/logging.dart' as app_log;
+import 'package:mcp_dart/mcp_dart.dart' as mcp;
+
+final appLogger = app_log.Logger('app.mcp');
+
+mcp.setMcpLogHandler((name, level, message) {
+  final mapped = switch (level) {
+    mcp.LogLevel.debug => app_log.Level.FINE,
+    mcp.LogLevel.info => app_log.Level.INFO,
+    mcp.LogLevel.warn => app_log.Level.WARNING,
+    mcp.LogLevel.error => app_log.Level.SEVERE,
+  };
+  appLogger.log(mapped, '[$name] $message');
+});
+
+// Silence SDK runtime logs.
+mcp.silenceMcpLogs();
+
+// Restore default SDK log output.
+mcp.resetMcpLogHandler();
 ```
 
 ## Resource Subscriptions
@@ -732,14 +806,14 @@ test('example', () async {
 
   final server = McpServer(...);
   await server.connect(IOStreamTransport(
-    inputStream: c2s.stream,
-    outputSink: s2c.sink,
+    stream: c2s.stream,
+    sink: s2c.sink,
   ));
 
   final client = McpClient(...);
   await client.connect(IOStreamTransport(
-    inputStream: s2c.stream,
-    outputSink: c2s.sink,
+    stream: s2c.stream,
+    sink: c2s.sink,
   ));
 
   // Test operations

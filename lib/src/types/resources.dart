@@ -46,6 +46,9 @@ class Resource {
   /// A human-readable name for the resource.
   final String name;
 
+  /// A human-readable title for the resource.
+  final String? title;
+
   /// A description of what the resource represents.
   final String? description;
 
@@ -61,14 +64,19 @@ class Resource {
   /// Optional additional properties describing the resource.
   final ResourceAnnotations? annotations;
 
+  /// Optional metadata.
+  final Map<String, dynamic>? meta;
+
   const Resource({
     required this.uri,
     required this.name,
+    this.title,
     this.description,
     this.mimeType,
     this.icon,
     this.icons,
     this.annotations,
+    this.meta,
   });
 
   /// Creates from JSON.
@@ -76,6 +84,7 @@ class Resource {
     return Resource(
       uri: json['uri'] as String,
       name: json['name'] as String,
+      title: json['title'] as String?,
       description: json['description'] as String?,
       mimeType: json['mimeType'] as String?,
       icon: json['icon'] != null
@@ -89,6 +98,7 @@ class Resource {
               json['annotations'] as Map<String, dynamic>,
             )
           : null,
+      meta: (json['_meta'] as Map?)?.cast<String, dynamic>(),
     );
   }
 
@@ -96,12 +106,14 @@ class Resource {
   Map<String, dynamic> toJson() => {
         'uri': uri,
         'name': name,
+        if (title != null) 'title': title,
         if (description != null) 'description': description,
         if (mimeType != null) 'mimeType': mimeType,
         if (icon != null) 'icon': icon!.toJson(),
         if (icons != null)
           'icons': icons!.map((icon) => icon.toJson()).toList(),
         if (annotations != null) 'annotations': annotations!.toJson(),
+        if (meta != null) '_meta': meta,
       };
 }
 
@@ -112,6 +124,9 @@ class ResourceTemplate {
 
   /// A human-readable name for the type of resource this template refers to.
   final String name;
+
+  /// A human-readable title for this template.
+  final String? title;
 
   /// A description of what this template is for.
   final String? description;
@@ -128,15 +143,20 @@ class ResourceTemplate {
   /// Optional additional properties describing the resource template.
   final ResourceAnnotations? annotations;
 
+  /// Optional metadata.
+  final Map<String, dynamic>? meta;
+
   /// Creates a resource template description.
   const ResourceTemplate({
     required this.uriTemplate,
     required this.name,
+    this.title,
     this.description,
     this.mimeType,
     this.icon,
     this.icons,
     this.annotations,
+    this.meta,
   });
 
   /// Creates from JSON.
@@ -144,6 +164,7 @@ class ResourceTemplate {
     return ResourceTemplate(
       uriTemplate: json['uriTemplate'] as String,
       name: json['name'] as String,
+      title: json['title'] as String?,
       description: json['description'] as String?,
       mimeType: json['mimeType'] as String?,
       icon: json['icon'] != null
@@ -157,6 +178,7 @@ class ResourceTemplate {
               json['annotations'] as Map<String, dynamic>,
             )
           : null,
+      meta: (json['_meta'] as Map?)?.cast<String, dynamic>(),
     );
   }
 
@@ -164,12 +186,14 @@ class ResourceTemplate {
   Map<String, dynamic> toJson() => {
         'uriTemplate': uriTemplate,
         'name': name,
+        if (title != null) 'title': title,
         if (description != null) 'description': description,
         if (mimeType != null) 'mimeType': mimeType,
         if (icon != null) 'icon': icon!.toJson(),
         if (icons != null)
           'icons': icons!.map((icon) => icon.toJson()).toList(),
         if (annotations != null) 'annotations': annotations!.toJson(),
+        if (meta != null) '_meta': meta,
       };
 }
 

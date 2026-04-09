@@ -225,13 +225,45 @@ This helper handles:
 
 ### DNS Rebinding Protection
 
-`StreamableMcpServer` and `StreamableHTTPServerTransport` support optional DNS rebinding protection.
+`StreamableMcpServer` and `StreamableHTTPServerTransport` support DNS rebinding protection, enabled by default for Streamable HTTP entry points.
 
 - Validate `Host` against `allowedHosts`
 - Validate `Origin` against `allowedOrigins` (if provided)
 - Reject missing/invalid host headers when protection is enabled
 
 Use this for remote/browser-exposed deployments.
+
+### Streamable HTTP Strict Defaults
+
+By default, Streamable HTTP server transports also enforce:
+
+- Strict `MCP-Protocol-Version` request header validation
+- Rejection of JSON-RPC batch POST payloads
+
+If you need a temporary compatibility mode during migration, disable strict checks explicitly:
+
+```dart
+final server = StreamableMcpServer(
+  serverFactory: (sessionId) => McpServer(
+    const Implementation(name: 'server', version: '1.0.0'),
+  ),
+  strictProtocolVersionHeaderValidation: false,
+  rejectBatchJsonRpcPayloads: false,
+  enableDnsRebindingProtection: false,
+);
+```
+
+Or with low-level transport options:
+
+```dart
+final transport = StreamableHTTPServerTransport(
+  options: StreamableHTTPServerTransportOptions(
+    strictProtocolVersionHeaderValidation: false,
+    rejectBatchJsonRpcPayloads: false,
+    enableDnsRebindingProtection: false,
+  ),
+);
+```
 
 ### Server Setup (Streamable HTTP)
 
@@ -460,8 +492,8 @@ void main() async {
   server.registerTool('example', ...);
 
   final serverTransport = IOStreamTransport(
-    inputStream: clientToServer.stream,
-    outputSink: serverToClient.sink,
+    stream: clientToServer.stream,
+    sink: serverToClient.sink,
   );
   await server.connect(serverTransport);
 
@@ -471,8 +503,8 @@ void main() async {
   );
 
   final clientTransport = IOStreamTransport(
-    inputStream: serverToClient.stream,
-    outputSink: clientToServer.sink,
+    stream: serverToClient.stream,
+    sink: clientToServer.sink,
   );
   await client.connect(clientTransport);
 
@@ -526,8 +558,8 @@ void main() {
     );
 
     await server.connect(IOStreamTransport(
-      inputStream: c2s.stream,
-      outputSink: s2c.sink,
+      stream: c2s.stream,
+      sink: s2c.sink,
     ));
 
     // Create client
@@ -536,8 +568,8 @@ void main() {
     );
 
     await client.connect(IOStreamTransport(
-      inputStream: s2c.stream,
-      outputSink: c2s.sink,
+      stream: s2c.stream,
+      sink: c2s.sink,
     ));
 
     // Test
@@ -691,12 +723,12 @@ class LoggingTransport extends Transport {
     await inner.start();
 
     inner.onMessage = (message) {
-      logger.fine('Received: $message');
+      logger.debug('Received: $message');
       onMessage?.call(message);
     };
 
     inner.onError = (error) {
-      logger.warning('Error: $error');
+      logger.warn('Error: $error');
       onError?.call(error);
     };
 
@@ -708,7 +740,7 @@ class LoggingTransport extends Transport {
 
   @override
   Future<void> send(JsonRpcMessage message) async {
-    logger.fine('Sending: $message');
+    logger.debug('Sending: $message');
     await inner.send(message);
   }
 
