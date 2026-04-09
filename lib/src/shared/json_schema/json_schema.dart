@@ -813,6 +813,7 @@ class JsonEnum extends JsonSchema {
       if (description != null) 'description': description,
       if (defaultValue != null) 'default': defaultValue,
       'type': 'enum',
+      'enum': values,
       'values': values,
     };
   }
