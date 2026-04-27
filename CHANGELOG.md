@@ -1,3 +1,18 @@
+## Unreleased
+
+### Compatibility Notes (Potentially Breaking)
+
+- **`JsonEnum` wire format is now standard JSON Schema**:
+  - `JsonEnum.toJson()` emits standard JSON Schema enum forms instead of the legacy
+    `type: 'enum'` / `values` shape.
+  - Legacy serialized enum input using `values` is still accepted when parsing.
+
+### Reliability
+
+- Fixed `JsonEnum` tool/input schema serialization to use standard JSON Schema enum output,
+  improving compatibility with downstream consumers that reject the legacy
+  `type: 'enum'` / `values` shape.
+
 ## 2.1.0
 
 ### Compatibility Notes (Potentially Breaking)

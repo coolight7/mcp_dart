@@ -811,9 +811,13 @@ class JsonEnum extends JsonSchema {
   @override
   final dynamic defaultValue;
 
+  /// The canonical values accepted by this enum schema.
+  List<dynamic> get normalizedValues =>
+      values.map((value) => _normalizeEntry(value).value).toList();
+
   factory JsonEnum.fromJson(Map<String, dynamic> json) {
     return JsonEnum(
-      json['values'] as List<dynamic>? ?? json['enum'] as List<dynamic>? ?? [],
+      _parseValues(json),
       title: json['title'] as String?,
       description: json['description'] as String?,
       defaultValue: json['default'],
@@ -822,12 +826,88 @@ class JsonEnum extends JsonSchema {
 
   @override
   Map<String, dynamic> toJson() {
+    final normalizedEntries =
+        values.map((value) => _normalizeEntry(value)).toList(growable: false);
+    final hasTitles = normalizedEntries.any((entry) => entry.title != null);
+    final allStrings =
+        normalizedEntries.every((entry) => entry.value is String);
+
     return {
       if (title != null) 'title': title,
       if (description != null) 'description': description,
       if (defaultValue != null) 'default': defaultValue,
-      'type': 'enum',
-      'values': values,
+      if (allStrings) 'type': 'string',
+      if (allStrings)
+        'enum': normalizedEntries.map((entry) => entry.value as String).toList()
+      else if (!hasTitles)
+        'enum': normalizedEntries.map((entry) => entry.value).toList()
+      else
+        'oneOf': normalizedEntries
+            .map(
+              (entry) => {
+                'const': entry.value,
+                if (entry.title != null) 'title': entry.title,
+              },
+            )
+            .toList(),
+      if (allStrings && hasTitles)
+        'enumNames': normalizedEntries
+            .map((entry) => entry.title ?? entry.value as String)
+            .toList(),
     };
+  }
+
+  static List<dynamic> _parseValues(Map<String, dynamic> json) {
+    final legacyValues = json['values'];
+    if (legacyValues is List) {
+      return List<dynamic>.from(legacyValues);
+    }
+
+    final enumValues = json['enum'];
+    if (enumValues is List) {
+      final enumNames = json['enumNames'];
+      if (enumNames is List && enumNames.length == enumValues.length) {
+        return List<dynamic>.generate(enumValues.length, (index) {
+          final value = enumValues[index];
+          final title = enumNames[index];
+          if (title is String && title != '$value') {
+            return {'value': value, 'title': title};
+          }
+          return value;
+        });
+      }
+
+      return List<dynamic>.from(enumValues);
+    }
+
+    final oneOfValues = json['oneOf'];
+    if (oneOfValues is List) {
+      return oneOfValues.map((entry) {
+        if (entry is Map && entry.containsKey('const')) {
+          final value = entry['const'];
+          final title = entry['title'];
+          if (title is String && title != '$value') {
+            return {'value': value, 'title': title};
+          }
+          return value;
+        }
+
+        return entry;
+      }).toList();
+    }
+
+    return const [];
+  }
+
+  static ({dynamic value, String? title}) _normalizeEntry(dynamic entry) {
+    if (entry is Map && entry.containsKey('value')) {
+      final title = entry['title'];
+      return (
+        value: entry['value'],
+        title: title is String ? title : null,
+      );
+    }
+
+    return (value: entry, title: null);
   }
 }

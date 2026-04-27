@@ -184,11 +184,15 @@ void main() {
       expect((schema.values[1] as Map)['title'], 'Complex Option');
 
       final json = schema.toJson();
-      expect(json['values'], hasLength(2));
+      expect(json['type'], 'string');
+      expect(json['enum'], ['simple', 'complex']);
+      expect(json['enumNames'], ['simple', 'Complex Option']);
+      expect(json.containsKey('values'), isFalse);
 
       final deserialized = JsonEnum.fromJson(json);
       expect(deserialized.values[0], 'simple');
       expect((deserialized.values[1] as Map)['value'], 'complex');
+      expect((deserialized.values[1] as Map)['title'], 'Complex Option');
     });
 
     test('ToolAnnotations SEP-???', () {

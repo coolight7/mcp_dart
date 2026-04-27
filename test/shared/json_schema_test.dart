@@ -163,6 +163,27 @@ void main() {
         'not': {'type': 'string'},
       });
     });
+
+    test('JsonEnum serializes titled string values compatibly', () {
+      const schema = JsonEnum([
+        'simple',
+        {'value': 'complex', 'title': 'Complex Option'},
+      ]);
+
+      expect(schema.toJson(), {
+        'type': 'string',
+        'enum': ['simple', 'complex'],
+        'enumNames': ['simple', 'Complex Option'],
+      });
+    });
+
+    test('JsonEnum serializes mixed primitive values as standard enum', () {
+      const schema = JsonEnum([1, 'two', true, null]);
+
+      expect(schema.toJson(), {
+        'enum': [1, 'two', true, null],
+      });
+    });
   });
 
   group('JsonSchema Validation Integration', () {

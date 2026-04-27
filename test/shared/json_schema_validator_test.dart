@@ -416,6 +416,21 @@ void main() {
           throwsA(isA<JsonSchemaValidationException>()),
         );
       });
+
+      test('validates titled enum values against canonical values', () {
+        final schema = const JsonEnum([
+          'simple',
+          {'value': 'complex', 'title': 'Complex Option'},
+        ]);
+
+        schema.validate('simple');
+        schema.validate('complex');
+
+        expect(
+          () => schema.validate('Complex Option'),
+          throwsA(isA<JsonSchemaValidationException>()),
+        );
+      });
     });
 
     group('composition schemas', () {

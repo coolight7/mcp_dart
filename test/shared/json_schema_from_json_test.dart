@@ -22,6 +22,17 @@ void main() {
       expect(s.enumValues, ['a', 'b']);
     });
 
+    test('parses legacy enum schema', () {
+      final json = {
+        'type': 'enum',
+        'values': ['simple', 'complex'],
+      };
+      final schema = JsonSchema.fromJson(json);
+      expect(schema, isA<JsonEnum>());
+      final s = schema as JsonEnum;
+      expect(s.values, ['simple', 'complex']);
+    });
+
     test('parses number schema', () {
       final json = {
         'type': 'number',

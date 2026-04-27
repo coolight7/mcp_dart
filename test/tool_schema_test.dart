@@ -143,6 +143,35 @@ void main() {
       );
     });
 
+    test('Tool serializes JsonEnum properties as standard enum schema', () {
+      const tool = Tool(
+        name: 'configure_mode',
+        inputSchema: JsonObject(
+          properties: {
+            'mode': JsonEnum([
+              'simple',
+              {'value': 'complex', 'title': 'Complex Option'},
+            ]),
+          },
+        ),
+      );
+
+      final json = tool.toJson();
+      final modeSchema =
+          json['inputSchema']['properties']['mode'] as Map<String, dynamic>;
+
+      expect(modeSchema['type'], equals('string'));
+      expect(modeSchema['enum'], equals(['simple', 'complex']));
+      expect(modeSchema['enumNames'], equals(['simple', 'Complex Option']));
+      expect(modeSchema.containsKey('values'), isFalse);
+
+      final restored = Tool.fromJson(json);
+      final restoredMode = (restored.inputSchema as JsonObject)
+          .properties!['mode'] as JsonString;
+      expect(restoredMode.enumValues, equals(['simple', 'complex']));
+      expect(restoredMode.enumNames, equals(['simple', 'Complex Option']));
+    });
+
     test('ListToolsResult preserves tool required fields', () {
       final tools = [
         Tool(
