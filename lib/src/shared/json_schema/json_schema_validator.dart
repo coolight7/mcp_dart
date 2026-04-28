@@ -318,9 +318,9 @@ extension JsonSchemaValidation on JsonSchema {
   }
 
   void _validateEnum(JsonEnum schema, dynamic data, List<String> path) {
-    if (!schema.values.any((e) => _deepEquals(e, data))) {
+    if (!schema.normalizedValues.any((value) => _deepEquals(value, data))) {
       throw JsonSchemaValidationException(
-        'Value must be one of ${schema.values}',
+        'Value must be one of ${schema.normalizedValues}',
         path,
       );
     }
