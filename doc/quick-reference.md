@@ -7,7 +7,7 @@ Fast lookup guide for common MCP Dart SDK operations.
 ```yaml
 # pubspec.yaml
 dependencies:
-  mcp_dart: ^2.1.0
+  mcp_dart: ^2.2.0
 ```
 
 ```bash
@@ -83,7 +83,7 @@ await server.connect(transport);
 server.registerTool(
   'tool-name',
   description: 'What it does',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'param': JsonSchema.string(),
     },
@@ -126,6 +126,12 @@ server.registerResourceTemplate(
   ResourceTemplateRegistration(
     'users://{userId}/profile',
     listCallback: null,
+    completeCallbacksWithContext: {
+      'userId': (value, context) async => suggestUsers(
+        prefix: value,
+        organization: context?.arguments?['organization'],
+      ),
+    },
   ),
   null,
   (uri, vars, extra) async {
@@ -198,6 +204,15 @@ server.registerPrompt(
       type: String,
       description: 'Argument description',
       required: true,
+      completable: CompletableField(
+        def: CompletableDef(
+          complete: (value) async => suggestValues(value),
+          completeWithContext: (value, context) async => suggestValues(
+            value,
+            previousArgs: context?.arguments,
+          ),
+        ),
+      ),
     ),
   },
   callback: (args, extra) async {
@@ -217,9 +232,31 @@ server.registerPrompt(
 
 ```dart
 server.experimental.onListTasks((extra) async => ListTasksResult(tasks: []));
-server.experimental.onCancelTask((taskId, extra) async { /* cancel */ });
-server.experimental.onGetTask((taskId, extra) async { /* get */ });
-server.experimental.onTaskResult((taskId, extra) async { /* result */ });
+server.experimental.onCancelTaskWithResult((taskId, extra) async {
+  // Cancel the task and return its final cancelled state.
+  final cancelled = await store.cancelTask(taskId);
+  if (!cancelled) {
+    throw McpError(
+      ErrorCode.invalidParams.value,
+      'Cannot cancel task: not found or already terminal',
+    );
+  }
+  final task = await store.getTask(taskId);
+  if (task == null) {
+    throw McpError(ErrorCode.invalidParams.value, 'Task not found');
+  }
+  return task;
+});
+server.experimental.onGetTask((taskId, extra) async {
+  final task = await store.getTask(taskId);
+  if (task == null) {
+    throw McpError(ErrorCode.invalidParams.value, 'Task not found');
+  }
+  return task;
+});
+server.experimental.onTaskResult((taskId, extra) async {
+  return await store.getTaskResult(taskId);
+});
 ```
 
 ### Connect Transport
@@ -272,8 +309,8 @@ final transport = StdioClientTransport(
 await client.connect(transport);
 
 // HTTP
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
 );
 await client.connect(transport);
 ```
@@ -306,6 +343,7 @@ print(result.content.first.text);
 final result = await client.listResources();
 for (final resource in result.resources) {
   print('${resource.name}: ${resource.uri}');
+  print('size: ${resource.size ?? "unknown"}');
   print('lastModified: ${resource.annotations?.lastModified}');
 }
 ```
@@ -355,7 +393,7 @@ await client.close();
 ```dart
 server.registerTool(
   'echo',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'message': JsonSchema.string(),
     },
@@ -371,7 +409,7 @@ server.registerTool(
 ```dart
 server.registerTool(
   'divide',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'a': JsonSchema.number(),
       'b': JsonSchema.number(),
@@ -400,22 +438,21 @@ server.registerTool(
 
 ```dart
 // Read-only
-// Read-only
 server.registerTool(
   'get-data',
-  inputSchema: ToolInputSchema(properties: {}),
-  annotations: ToolAnnotations(readOnly: true), // Updated for annotations
+  inputSchema: JsonSchema.object(properties: {}),
+  annotations: ToolAnnotations(readOnlyHint: true),
   callback: (args, extra) async => CallToolResult(content: []),
 );
 
 // Destructive
 server.registerTool(
   'delete-all',
-  inputSchema: ToolInputSchema(properties: {}),
-  description: 'Delete all data', // hints deprecated?
+  inputSchema: JsonSchema.object(properties: {}),
+  description: 'Delete all data',
+  annotations: ToolAnnotations(destructiveHint: true),
   callback: (args, extra) async => CallToolResult(content: []),
 );
-// Note: hints were part of deprecated signature. Use ToolAnnotations!
 ```
 
 ## Content Types
@@ -491,7 +528,7 @@ return CallToolResult(
 
 ```dart
 throw McpError(
-  ErrorCode.invalidParams,
+  ErrorCode.invalidParams.value,
   'Invalid parameters',
 );
 ```
@@ -562,6 +599,8 @@ try {
   enumValues: ['active', 'inactive', 'pending'],
 )
 ```
+
+`JsonSchema.string(enumValues: ...)` and untitled `JsonEnum` values serialize as standard JSON Schema using `enum`. Titled `JsonEnum` values serialize with `oneOf` or, for array items, `anyOf` const/title entries. Legacy `type: 'enum'` / `values` and `enumNames` input is still accepted when parsing.
 
 ### Array
 
@@ -676,9 +715,18 @@ client.setNotificationHandler<JsonRpcLoggingMessageNotification>(
   (notification) async {
     print('[${notification.logParams.level}] ${notification.logParams.data}');
   },
-  (params, meta) => JsonRpcLoggingMessageNotification(
-    logParams: LoggingMessageNotification.fromJson(params ?? {}),
-  ),
+  (params, meta) {
+    if (params == null) {
+      throw const FormatException(
+        'Missing params for logging message notification',
+      );
+    }
+
+    return JsonRpcLoggingMessageNotification(
+      logParams: LoggingMessageNotification.fromJson(params),
+      meta: meta,
+    );
+  },
 );
 ```
 
@@ -726,9 +774,18 @@ client.setNotificationHandler<JsonRpcResourceUpdatedNotification>(
     print('Updated: ${notification.updatedParams.uri}');
     // Re-read resource
   },
-  (params, meta) => JsonRpcResourceUpdatedNotification(
-    updatedParams: ResourceUpdatedNotification.fromJson(params ?? {}),
-  ),
+  (params, meta) {
+    if (params == null) {
+      throw const FormatException(
+        'Missing params for resource update notification',
+      );
+    }
+
+    return JsonRpcResourceUpdatedNotification(
+      updatedParams: ResourceUpdatedNotification.fromJson(params),
+      meta: meta,
+    );
+  },
 );
 ```
 
@@ -746,13 +803,15 @@ await client.unsubscribeResource(UnsubscribeRequest(
 
 ```dart
 final result = await client.complete(CompleteRequest(
-  ref: CompletionReference(
-    type: CompletionReferenceType.resourceRef,
-    uri: 'users://{userId}/profile',
+  ref: const ResourceReference(
+    uri: 'users://{organization}/{userId}/profile',
   ),
-  argument: CompletionArgument(
+  argument: const ArgumentCompletionInfo(
     name: 'userId',
     value: 'al',  // Partial
+  ),
+  context: const CompletionContext(
+    arguments: {'organization': 'engineering'},
   ),
 ));
 
@@ -765,13 +824,16 @@ for (final value in result.completion.values) {
 
 ```dart
 final result = await client.complete(CompleteRequest(
-  ref: CompletionReference(
-    type: CompletionReferenceType.promptRef,
+  ref: const PromptReference(
     name: 'translate',
+    title: 'Translate text',
   ),
-  argument: CompletionArgument(
+  argument: const ArgumentCompletionInfo(
     name: 'language',
     value: 'Spa',
+  ),
+  context: const CompletionContext(
+    arguments: {'source_language': 'English'},
   ),
 ));
 ```

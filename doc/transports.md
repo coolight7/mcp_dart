@@ -177,6 +177,10 @@ void main() async {
 }
 ```
 
+#### 4. Concurrent Requests
+
+`StdioClientTransport` and `StdioServerTransport` serialize concurrent `send()` calls internally, so overlapping requests such as `Future.wait([...client.callTool(...)])` are safe on a single connected transport. Stdio servers should still reserve `stdout` for MCP messages and write logs to `stderr`.
+
 ## HTTP/SSE Transport
 
 ### Overview
@@ -233,6 +237,154 @@ This helper handles:
 
 Use this for remote/browser-exposed deployments.
 
+#### Deployment recipes
+
+**Safe local development**
+
+Bind only to loopback and allow the exact browser development origin that needs
+to call the MCP endpoint:
+
+```dart
+final server = StreamableMcpServer(
+  serverFactory: (sessionId) => McpServer(
+    const Implementation(name: 'local-dev-server', version: '1.0.0'),
+  ),
+  host: '127.0.0.1',
+  port: 3000,
+  path: '/mcp',
+  enableDnsRebindingProtection: true,
+  allowedHosts: {'localhost', '127.0.0.1'},
+  allowedOrigins: {'http://localhost:5173'},
+);
+```
+
+Keep DNS rebinding protection enabled even on localhost. If your browser app runs
+on a different dev-server port, add that exact origin instead of using a wildcard.
+
+**Production browser or remote deployment**
+
+Terminate TLS at your reverse proxy or load balancer, expose only the public MCP
+hostname, and allow only the trusted web origins that should reach it. If your
+deployment needs the Dart process itself to accept HTTPS, provide a custom secure
+`HttpServer` setup; `StreamableMcpServer` binds its listener with plain HTTP:
+
+```dart
+final server = StreamableMcpServer(
+  serverFactory: (sessionId) => McpServer(
+    const Implementation(name: 'production-server', version: '1.0.0'),
+  ),
+  host: '0.0.0.0',
+  port: 3000,
+  path: '/mcp',
+  enableDnsRebindingProtection: true,
+  allowedHosts: {'mcp.example.com'},
+  allowedOrigins: {'https://app.example.com'},
+);
+```
+
+For authenticated deployments, pair these transport checks with your OAuth or
+bearer-token layer. The examples in `example/authentication/` show the MCP OAuth
+flow and PKCE shape; production clients should use PKCE S256 with cryptographic
+randomness and keep redirect URIs/origins explicit.
+
+`StreamableMcpServer` can advertise OAuth Protected Resource Metadata and return
+the MCP-required bearer challenge when authentication fails:
+
+```dart
+final server = StreamableMcpServer(
+  serverFactory: (sessionId) => McpServer(
+    const Implementation(name: 'protected-server', version: '1.0.0'),
+  ),
+  host: '0.0.0.0',
+  port: 3000,
+  path: '/mcp',
+  enableDnsRebindingProtection: true,
+  allowedHosts: {'mcp.example.com'},
+  allowedOrigins: {'https://app.example.com'},
+  authenticator: (request) {
+    final authorization = request.headers.value('Authorization');
+    return authorization == 'Bearer expected-token';
+  },
+  oauthProtectedResource: OAuthProtectedResourceOptions(
+    metadata: OAuthProtectedResourceMetadata(
+      resource: Uri.parse('https://mcp.example.com/mcp'),
+      authorizationServers: [Uri.parse('https://auth.example.com')],
+      scopesSupported: const ['tools:read'],
+    ),
+    metadataUri: Uri.parse(
+      'https://mcp.example.com/.well-known/oauth-protected-resource/mcp',
+    ),
+    scope: 'tools:read',
+  ),
+);
+```
+
+With this option enabled, failed authentication returns `401 Unauthorized` with
+`WWW-Authenticate: Bearer resource_metadata="..."`. Metadata is served at the
+endpoint-specific well-known path, such as
+`/.well-known/oauth-protected-resource/mcp`, and also at the root
+`/.well-known/oauth-protected-resource` by default. Without
+`oauthProtectedResource`, the generic `authenticator` hook keeps its historical
+`403 Forbidden` response. Set `metadataUri` to the public metadata URL when a
+reverse proxy or TLS terminator rewrites the scheme, host, or port observed by
+the Dart server.
+
+Use `authenticationHandler` when authorization needs to distinguish invalid
+credentials from insufficient scope:
+
+```dart
+authenticationHandler: (request) {
+  final authorization = request.headers.value('Authorization');
+  if (authorization == 'Bearer token-with-tools-write') {
+    return const StreamableMcpAuthenticationResult.allow();
+  }
+  if (authorization == 'Bearer token-without-tools-write') {
+    return const StreamableMcpAuthenticationResult.insufficientScope(
+      scope: 'tools:write',
+      errorDescription: 'Need tools:write',
+    );
+  }
+  return const StreamableMcpAuthenticationResult.unauthorized();
+},
+```
+
+With `oauthProtectedResource` configured, `insufficientScope` returns
+`403 Forbidden` plus a bearer challenge containing
+`error="insufficient_scope"`, `scope="..."`, and `resource_metadata="..."`.
+The existing bool `authenticator` callback remains source-compatible for simple
+allow/deny checks.
+
+On the client side, `StreamableHttpClientTransport` keeps existing
+`OAuthClientProvider` implementations working. Providers that also implement
+`OAuthAuthorizationCodeProvider` let the transport perform MCP OAuth discovery:
+it parses bearer challenges, fetches OAuth Protected Resource Metadata, falls
+back to the endpoint/root well-known protected-resource paths when needed,
+discovers OAuth Authorization Server Metadata or OpenID Connect Discovery
+metadata, builds a PKCE S256 authorization URL with the MCP `resource`
+parameter, and exchanges the authorization code with `code_verifier` and
+`resource` when `finishAuth(code)` is called. The exchanged value passed to
+`saveTokens` is an `OAuthAuthorizationCodeTokens` instance, so providers that
+want `tokenType`, `expiresIn`, or granted `scope` can read them by type-checking
+that subtype while older `OAuthTokens` implementations stay source-compatible.
+Authorization server metadata must explicitly advertise
+`code_challenge_methods_supported` with `S256`; missing metadata is treated as
+no PKCE support and the transport refuses the authorization-code flow.
+
+Executable coverage for these recipes lives in
+[`test/server/streamable_security_harness_test.dart`](../test/server/streamable_security_harness_test.dart).
+It verifies that local-development and production allowlists reject untrusted
+Host/Origin headers before authentication runs, and that authentication still
+gates requests after transport-level checks pass. The OAuth client PKCE flow is
+covered by
+[`test/example/oauth_client_example_test.dart`](../test/example/oauth_client_example_test.dart)
+with a local token endpoint, and the client transport discovery path is covered
+by [`test/client/streamable_https_test.dart`](../test/client/streamable_https_test.dart).
+The first-class OAuth protected-resource helper is covered by
+[`test/server/streamable_mcp_server_test.dart`](../test/server/streamable_mcp_server_test.dart)
+and the official TypeScript SDK OAuth interop path in
+[`test/interop/ts_client_with_dart_server_test.dart`](../test/interop/ts_client_with_dart_server_test.dart),
+including insufficient-scope upscoping from `tools:read` to `tools:write`.
+
 ### Streamable HTTP Strict Defaults
 
 By default, Streamable HTTP server transports also enforce:
@@ -240,30 +392,45 @@ By default, Streamable HTTP server transports also enforce:
 - Strict `MCP-Protocol-Version` request header validation
 - Rejection of JSON-RPC batch POST payloads
 
-If you need a temporary compatibility mode during migration, disable strict checks explicitly:
+These defaults make compatibility failures visible instead of accepting requests
+that the Streamable HTTP spec no longer allows. If you need a temporary migration
+mode, disable only the specific check that blocks a known legacy client:
 
 ```dart
 final server = StreamableMcpServer(
   serverFactory: (sessionId) => McpServer(
     const Implementation(name: 'server', version: '1.0.0'),
   ),
+  // Only if a legacy client still sends older or experimental versions.
   strictProtocolVersionHeaderValidation: false,
-  rejectBatchJsonRpcPayloads: false,
-  enableDnsRebindingProtection: false,
+  // Keep DNS rebinding protection enabled and explicit.
+  enableDnsRebindingProtection: true,
+  allowedHosts: {'mcp.example.com'},
+  allowedOrigins: {'https://app.example.com'},
 );
 ```
 
-Or with low-level transport options:
+Or with low-level transport options for a legacy client that temporarily still
+sends JSON-RPC batch payloads:
 
 ```dart
 final transport = StreamableHTTPServerTransport(
   options: StreamableHTTPServerTransportOptions(
-    strictProtocolVersionHeaderValidation: false,
+    // Prefer migrating clients to non-batch Streamable HTTP requests.
     rejectBatchJsonRpcPayloads: false,
-    enableDnsRebindingProtection: false,
+    enableDnsRebindingProtection: true,
+    allowedHosts: {'mcp.example.com'},
+    allowedOrigins: {'https://app.example.com'},
   ),
 );
 ```
+
+Avoid disabling `enableDnsRebindingProtection` on browser-exposed or remote
+servers. If you must disable it for an internal compatibility test, bind to
+loopback/private networking and put the exception behind a short-lived migration
+plan. The compatibility-toggle harness keeps Host/Origin protection enabled
+while selectively disabling protocol-version or batch rejection checks, so
+legacy-client migration does not silently weaken DNS rebinding defenses.
 
 ### Server Setup (Streamable HTTP)
 
@@ -287,7 +454,7 @@ void main() async {
   // Register capabilities
   server.registerTool(
     'example',
-    inputSchema: ToolInputSchema(properties: {}),
+    inputSchema: JsonSchema.object(properties: {}),
     callback: (args, extra) async {
       return CallToolResult(content: [TextContent(text: 'ok')]);
     },
@@ -295,8 +462,7 @@ void main() async {
 
   final transport = StreamableHTTPServerTransport(
     options: StreamableHTTPServerTransportOptions(
-      sessionIdGenerator: () =>
-          'session-${DateTime.now().millisecondsSinceEpoch}',
+      sessionIdGenerator: () => generateUUID(),
       eventStore: InMemoryEventStore(),
       enableDnsRebindingProtection: true,
       allowedHosts: {'localhost'},
@@ -309,7 +475,7 @@ void main() async {
 
   // Create HTTP server
   final httpServer = await HttpServer.bind('localhost', 3000);
-  print('Server listening on http://localhost:3000');
+  print('Server listening on http://localhost:3000/mcp');
 
   await for (final request in httpServer) {
     if (request.uri.path != '/mcp') {
@@ -332,8 +498,8 @@ final client = McpClient(
   Implementation(name: 'client', version: '1.0.0'),
 );
 
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
 );
 
 await client.connect(transport);
@@ -347,8 +513,7 @@ await client.connect(transport);
 // Server: Enable session persistence
 final transport = StreamableHTTPServerTransport(
   options: StreamableHTTPServerTransportOptions(
-    sessionIdGenerator: () =>
-        'session-${DateTime.now().millisecondsSinceEpoch}',
+    sessionIdGenerator: () => generateUUID(),
     eventStore: InMemoryEventStore(), // Enables resumability
   ),
 );
@@ -356,11 +521,38 @@ final transport = StreamableHTTPServerTransport(
 
 ```dart
 // Client: Resume session
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
-  sessionId: 'existing-session-id',  // Resume this session
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
+  opts: const StreamableHttpClientTransportOptions(
+    sessionId: 'existing-session-id', // Resume this session
+  ),
 );
 ```
+
+Generated session IDs are sent in the `MCP-Session-Id` response header. Keep
+custom `sessionIdGenerator` output non-empty visible ASCII without spaces or
+control characters; UUIDs such as `generateUUID()` are a safe default. Invalid
+generated IDs are rejected before the header is written.
+
+With an `eventStore`, resumability follows Streamable HTTP SSE event IDs:
+custom event IDs must be non-empty visible ASCII without spaces or control
+characters because they are written to SSE `id:` fields and later sent in the
+`Last-Event-ID` HTTP header. `Last-Event-ID` replays only events from the
+owning live transport/session stream, and unknown or foreign event IDs are
+rejected instead of replaying unrelated stream history. Concurrent standalone
+GET SSE streams are not fan-out subscriptions: each server-originated JSON-RPC
+message is routed to one active stream, not broadcast to every open GET stream.
+When a server opens an SSE stream and an event store is configured, the SDK
+writes an initial SSE frame with an `id` and empty `data` field so reconnecting
+clients can resume from a concrete stream event even before JSON-RPC messages
+are available.
+
+When using `StreamableHttpClientTransport` through `McpClient.request`, a
+stateful `404 Session not found` clears the stale session, starts a fresh
+session with a new `initialize` request that omits the stale `MCP-Session-Id`,
+and retries the original request once. Direct `Transport.send` callers and
+custom transports can opt into the same client recovery path by throwing
+`StaleSessionError` when their stateful session is rejected.
 
 #### Stateless Mode
 
@@ -378,8 +570,7 @@ final transport = StreamableHTTPServerTransport(
 ```dart
 final transport = StreamableHTTPServerTransport(
   options: StreamableHTTPServerTransportOptions(
-    sessionIdGenerator: () =>
-        'session-${DateTime.now().millisecondsSinceEpoch}',
+    sessionIdGenerator: () => generateUUID(),
   ),
 );
 
@@ -403,24 +594,32 @@ If you enable DNS rebinding protection, set explicit `allowedOrigins` for browse
 
 ### Best Practices
 
-#### 1. Connection Pooling
+#### 1. Request Headers
 
 ```dart
-// Reuse HTTP client connections
-final httpClient = HttpClient();
-
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
-  httpClient: httpClient,  // Shared client
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
+  opts: const StreamableHttpClientTransportOptions(
+    requestInit: <String, dynamic>{
+      'headers': <String, dynamic>{'X-Client-Name': 'mcp-dart-example'},
+    },
+  ),
 );
 ```
 
-#### 2. Timeout Configuration
+#### 2. Reconnection Configuration
 
 ```dart
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
-  timeout: Duration(seconds: 30),
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
+  opts: const StreamableHttpClientTransportOptions(
+    reconnectionOptions: const StreamableHttpReconnectionOptions(
+      maxReconnectionDelay: 30000,
+      initialReconnectionDelay: 1000,
+      reconnectionDelayGrowFactor: 1.5,
+      maxRetries: 3,
+    ),
+  ),
 );
 ```
 
@@ -543,7 +742,7 @@ void main() {
     server.registerTool(
       'add',
       description: 'Add numbers',
-      inputSchema: ToolInputSchema(
+      inputSchema: JsonSchema.object(
         properties: {
           'a': JsonSchema.number(),
           'b': JsonSchema.number(),
@@ -620,8 +819,7 @@ await manager.handleRequest(request);
 // New (recommended)
 final transport = StreamableHTTPServerTransport(
   options: StreamableHTTPServerTransportOptions(
-    sessionIdGenerator: () =>
-        'session-${DateTime.now().millisecondsSinceEpoch}',
+    sessionIdGenerator: () => generateUUID(),
     eventStore: InMemoryEventStore(),
     enableDnsRebindingProtection: true,
     allowedHosts: {'localhost'},
@@ -680,8 +878,12 @@ class CustomTransport extends Transport {
   }
 
   @override
-  Future<void> send(JsonRpcMessage message) async {
-    // Send message
+  Future<void> send(
+    JsonRpcMessage message, {
+    int? relatedRequestId,
+  }) async {
+    // Send message. Existing transports can keep the int? relatedRequestId
+    // signature for source compatibility.
   }
 
   @override
@@ -689,19 +891,41 @@ class CustomTransport extends Transport {
     // Clean up resources
   }
 
+  @override
+  String? get sessionId => null;
+
   // Call this when receiving messages
   void receiveMessage(JsonRpcMessage message) {
-    onMessage?.call(message);
+    onmessage?.call(message);
   }
 
   // Call this on connection close
   void handleClose() {
-    onClose?.call();
+    onclose?.call();
   }
 
   // Call this on errors
-  void handleError(Object error) {
-    onError?.call(error);
+  void handleError(Error error) {
+    onerror?.call(error);
+  }
+}
+```
+
+### Request ID-aware Transports
+
+If a custom transport routes messages by JSON-RPC request ID or stream
+correlation key, implement `RequestIdAwareTransport` in addition to `Transport`
+so string request IDs are preserved:
+
+```dart
+class StreamRoutingTransport extends CustomTransport
+    implements RequestIdAwareTransport {
+  @override
+  Future<void> sendWithRequestId(
+    JsonRpcMessage message, {
+    RequestId? relatedRequestId,
+  }) async {
+    // Route with the full JSON-RPC request ID shape: String or int.
   }
 }
 ```
@@ -711,7 +935,7 @@ class CustomTransport extends Transport {
 Add logging, metrics, or filtering:
 
 ```dart
-class LoggingTransport extends Transport {
+class LoggingTransport extends Transport implements RequestIdAwareTransport {
   final Transport inner;
   final Logger logger;
 
@@ -722,26 +946,41 @@ class LoggingTransport extends Transport {
     logger.info('Starting transport');
     await inner.start();
 
-    inner.onMessage = (message) {
+    inner.onmessage = (message) {
       logger.debug('Received: $message');
-      onMessage?.call(message);
+      onmessage?.call(message);
     };
 
-    inner.onError = (error) {
+    inner.onerror = (error) {
       logger.warn('Error: $error');
-      onError?.call(error);
+      onerror?.call(error);
     };
 
-    inner.onClose = () {
+    inner.onclose = () {
       logger.info('Closed');
-      onClose?.call();
+      onclose?.call();
     };
   }
 
   @override
-  Future<void> send(JsonRpcMessage message) async {
+  Future<void> send(
+    JsonRpcMessage message, {
+    int? relatedRequestId,
+  }) async {
     logger.debug('Sending: $message');
-    await inner.send(message);
+    await inner.send(message, relatedRequestId: relatedRequestId);
+  }
+
+  @override
+  Future<void> sendWithRequestId(
+    JsonRpcMessage message, {
+    RequestId? relatedRequestId,
+  }) async {
+    logger.debug('Sending: $message');
+    await inner.sendPreservingRequestId(
+      message,
+      relatedRequestId: relatedRequestId,
+    );
   }
 
   @override
@@ -749,6 +988,9 @@ class LoggingTransport extends Transport {
     logger.info('Closing transport');
     await inner.close();
   }
+
+  @override
+  String? get sessionId => inner.sessionId;
 }
 
 // Usage
@@ -804,13 +1046,20 @@ request.response.headers
   ..set('Access-Control-Allow-Headers', 'Content-Type');
 ```
 
-**Problem**: Connection timeout
+**Problem**: SSE reconnects give up too quickly
 
 ```dart
-// Increase timeout
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
-  timeout: Duration(seconds: 60),
+// Increase retry attempts and maximum backoff
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
+  opts: const StreamableHttpClientTransportOptions(
+    reconnectionOptions: const StreamableHttpReconnectionOptions(
+      maxReconnectionDelay: 60000,
+      initialReconnectionDelay: 1000,
+      reconnectionDelayGrowFactor: 1.5,
+      maxRetries: 5,
+    ),
+  ),
 );
 ```
 
@@ -818,9 +1067,11 @@ final transport = StreamableHTTPClientTransport(
 
 ```dart
 // Client: Provide session ID
-final transport = StreamableHTTPClientTransport(
-  Uri.parse('http://localhost:3000'),
-  sessionId: previousSessionId,
+final transport = StreamableHttpClientTransport(
+  Uri.parse('http://localhost:3000/mcp'),
+  opts: StreamableHttpClientTransportOptions(
+    sessionId: previousSessionId,
+  ),
 );
 ```
 

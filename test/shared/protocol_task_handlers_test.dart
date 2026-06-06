@@ -6,6 +6,9 @@ import 'package:mcp_dart/src/shared/transport.dart';
 import 'package:mcp_dart/src/types.dart';
 import 'package:test/test.dart';
 
+const _taskCreatedAt = '2026-05-14T10:00:00Z';
+const _taskUpdatedAt = '2026-05-14T10:01:00Z';
+
 /// Mock TaskStore for testing protocol task handlers
 class MockTaskStore implements TaskStore {
   final Map<String, Task> tasks = {};
@@ -22,6 +25,9 @@ class MockTaskStore implements TaskStore {
     final task = Task(
       taskId: taskId,
       status: TaskStatus.working,
+      createdAt: _taskCreatedAt,
+      lastUpdatedAt: _taskCreatedAt,
+      ttl: null,
     );
     tasks[taskId] = task;
     return task;
@@ -41,7 +47,14 @@ class MockTaskStore implements TaskStore {
   ]) async {
     results[taskId] = result;
     if (tasks.containsKey(taskId)) {
-      tasks[taskId] = Task(taskId: taskId, status: status);
+      final task = tasks[taskId]!;
+      tasks[taskId] = Task(
+        taskId: taskId,
+        status: status,
+        createdAt: task.createdAt,
+        lastUpdatedAt: _taskUpdatedAt,
+        ttl: task.ttl,
+      );
     }
   }
 
@@ -65,6 +78,9 @@ class MockTaskStore implements TaskStore {
         taskId: taskId,
         status: status,
         statusMessage: statusMessage,
+        createdAt: tasks[taskId]!.createdAt,
+        lastUpdatedAt: _taskUpdatedAt,
+        ttl: tasks[taskId]!.ttl,
       );
     }
   }
@@ -216,6 +232,9 @@ void main() {
         taskId: 'task-1',
         status: TaskStatus.working,
         statusMessage: 'In progress',
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
 
       // Simulate tasks/get request
@@ -269,10 +288,16 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
       taskStore.tasks['task-2'] = const Task(
         taskId: 'task-2',
         status: TaskStatus.completed,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskUpdatedAt,
+        ttl: null,
       );
 
       // Simulate tasks/list request
@@ -300,6 +325,9 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
 
       // Simulate tasks/cancel request
@@ -328,6 +356,9 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.completed,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskUpdatedAt,
+        ttl: null,
       );
 
       // Simulate tasks/cancel request
@@ -351,6 +382,98 @@ void main() {
       expect(errorResponse.error.message, contains('terminal status'));
     });
 
+    test('request task store ignores terminal result updates', () async {
+      await protocol.connect(transport);
+
+      final firstResult = CallToolResult.fromContent([
+        const TextContent(text: 'first result'),
+      ]);
+      taskStore.tasks['task-1'] = const Task(
+        taskId: 'task-1',
+        status: TaskStatus.completed,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskUpdatedAt,
+        ttl: null,
+      );
+      taskStore.results['task-1'] = firstResult;
+
+      protocol.setRequestHandler<JsonRpcRequest>(
+        'test/store-terminal-result',
+        (request, extra) async {
+          await extra.taskStore!.storeTaskResult(
+            'task-1',
+            TaskStatus.failed,
+            CallToolResult.fromContent([
+              const TextContent(text: 'second result'),
+            ]),
+          );
+          return const EmptyResult();
+        },
+        (id, params, meta) => JsonRpcRequest(
+          id: id,
+          method: 'test/store-terminal-result',
+          params: params,
+          meta: meta,
+        ),
+      );
+
+      transport.receiveMessage(
+        const JsonRpcRequest(id: 5, method: 'test/store-terminal-result'),
+      );
+
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      expect(taskStore.tasks['task-1']?.status, TaskStatus.completed);
+      expect(taskStore.tasks['task-1']?.lastUpdatedAt, _taskUpdatedAt);
+      expect(taskStore.results['task-1'], same(firstResult));
+      expect(
+        transport.sentMessages.whereType<JsonRpcTaskStatusNotification>(),
+        isEmpty,
+      );
+      expect(transport.sentMessages.last, isA<JsonRpcResponse>());
+    });
+
+    test('request task store rejects result updates for missing tasks',
+        () async {
+      await protocol.connect(transport);
+
+      protocol.setRequestHandler<JsonRpcRequest>(
+        'test/store-missing-result',
+        (request, extra) async {
+          await extra.taskStore!.storeTaskResult(
+            'missing-task',
+            TaskStatus.completed,
+            CallToolResult.fromContent([
+              const TextContent(text: 'orphan result'),
+            ]),
+          );
+          return const EmptyResult();
+        },
+        (id, params, meta) => JsonRpcRequest(
+          id: id,
+          method: 'test/store-missing-result',
+          params: params,
+          meta: meta,
+        ),
+      );
+
+      transport.receiveMessage(
+        const JsonRpcRequest(id: 6, method: 'test/store-missing-result'),
+      );
+
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      expect(taskStore.results.containsKey('missing-task'), isFalse);
+      final response = transport.sentMessages.last;
+      expect(response, isA<JsonRpcError>());
+      final errorResponse = response as JsonRpcError;
+      expect(errorResponse.error.code, ErrorCode.invalidParams.value);
+      expect(
+        errorResponse.error.message,
+        'Failed to store task result: Task not found',
+      );
+    });
+
     test('tasks/cancel handler clears message queue', () async {
       await protocol.connect(transport);
 
@@ -358,6 +481,9 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
 
       // Add messages to queue
@@ -421,6 +547,9 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
 
       // Send notification with relatedTask
@@ -448,6 +577,55 @@ void main() {
       );
     });
 
+    test('related task request response preserves result metadata', () async {
+      final protocol = TaskTestProtocol();
+      final transport = TaskTestMockTransport();
+      await protocol.connect(transport);
+
+      protocol.setRequestHandler<JsonRpcRequest>(
+        'test/related-response',
+        (request, extra) async => const EmptyResult(
+          meta: {
+            'source': 'handler',
+            relatedTaskMetadataKey: {'taskId': 'stale-task'},
+            legacyRelatedTaskMetadataKey: {'taskId': 'stale-task'},
+          },
+        ),
+        (id, params, meta) => JsonRpcRequest(
+          id: id,
+          method: 'test/related-response',
+          params: params,
+          meta: meta,
+        ),
+      );
+
+      transport.receiveMessage(
+        const JsonRpcRequest(
+          id: 20,
+          method: 'test/related-response',
+          meta: {
+            relatedTaskMetadataKey: {'taskId': 'task-1'},
+          },
+        ),
+      );
+
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      final response = transport.sentMessages.single as JsonRpcResponse;
+      expect(response.meta?['source'], equals('handler'));
+      expect(
+        response.meta?[relatedTaskMetadataKey]?['taskId'],
+        equals('task-1'),
+      );
+      expect(
+        response.meta?[legacyRelatedTaskMetadataKey]?['taskId'],
+        equals('task-1'),
+      );
+
+      await protocol.close();
+      await transport.close();
+    });
+
     test('request with relatedTask queues message with dual metadata keys',
         () async {
       await protocol.connect(transport);
@@ -456,6 +634,9 @@ void main() {
       taskStore.tasks['task-1'] = const Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        createdAt: _taskCreatedAt,
+        lastUpdatedAt: _taskCreatedAt,
+        ttl: null,
       );
 
       final resultFuture = protocol.request<EmptyResult>(

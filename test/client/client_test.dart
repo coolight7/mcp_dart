@@ -281,17 +281,21 @@ void main() {
       transport.clearSentMessages();
 
       final params = const CompleteRequest(
-        ref: PromptReference(name: 'test-prompt'),
+        ref: PromptReference(name: 'test-prompt', title: 'Test Prompt'),
         argument: ArgumentCompletionInfo(name: 'arg1', value: 'val'),
+        context: CompletionContext(arguments: {'arg0': 'resolved'}),
       );
 
       await client.complete(params);
 
       // Verify a complete request was sent
       expect(transport.sentMessages.length, equals(1));
+      final request = transport.sentMessages.first as JsonRpcRequest;
+      expect(request.method, equals('completion/complete'));
+      expect(request.params?['ref']['title'], equals('Test Prompt'));
       expect(
-        (transport.sentMessages.first as JsonRpcRequest).method,
-        equals('completion/complete'),
+        request.params?['context']['arguments'],
+        equals({'arg0': 'resolved'}),
       );
     });
 
@@ -796,9 +800,12 @@ void _addCriticalPathTests() {
       // Simulate server sending elicitation request
       final elicitRequest = JsonRpcElicitRequest(
         id: 100,
-        elicitParams: ElicitRequest(
+        elicitParams: const ElicitRequest(
           message: 'Please provide input',
-          requestedSchema: JsonSchema.string(),
+          requestedSchema: JsonObject(
+            properties: {'input': JsonString()},
+            required: ['input'],
+          ),
         ),
       );
 
@@ -1099,6 +1106,169 @@ void _addCriticalPathTests() {
               .having((e) => e.message, 'message', contains('sampling')),
         ),
       );
+    });
+
+    test('sampling tools request requires sampling.tools capability', () async {
+      final client = Client(
+        const Implementation(name: 'TestClient', version: '1.0.0'),
+        options: const McpClientOptions(
+          capabilities: ClientCapabilities(
+            sampling: ClientCapabilitiesSampling(),
+          ),
+        ),
+      );
+      final transport = MockTransport()
+        ..mockInitializeResponse = const InitializeResult(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ServerCapabilities(),
+          serverInfo: Implementation(name: 'TestServer', version: '2.0.0'),
+        );
+      var handlerCalled = false;
+      client.onSamplingRequest = (params) async {
+        handlerCalled = true;
+        return const CreateMessageResult(
+          model: 'test-model',
+          role: SamplingMessageRole.assistant,
+          content: SamplingTextContent(text: 'response'),
+        );
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.receiveMessage(
+        JsonRpcCreateMessageRequest(
+          id: 'sample-1',
+          createParams: const CreateMessageRequest(
+            messages: [
+              SamplingMessage(
+                role: SamplingMessageRole.user,
+                content: SamplingTextContent(text: 'Use a tool'),
+              ),
+            ],
+            maxTokens: 32,
+            tools: [
+              Tool(name: 'search', inputSchema: JsonObject()),
+            ],
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(handlerCalled, isFalse);
+      expect(transport.sentMessages.single, isA<JsonRpcError>());
+      final error = transport.sentMessages.single as JsonRpcError;
+      expect(error.id, 'sample-1');
+      expect(error.error.code, ErrorCode.invalidRequest.value);
+      expect(error.error.message, contains('sampling.tools'));
+    });
+
+    test('sampling toolChoice request requires sampling.tools capability',
+        () async {
+      final client = Client(
+        const Implementation(name: 'TestClient', version: '1.0.0'),
+        options: const McpClientOptions(
+          capabilities: ClientCapabilities(
+            sampling: ClientCapabilitiesSampling(),
+          ),
+        ),
+      );
+      final transport = MockTransport()
+        ..mockInitializeResponse = const InitializeResult(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ServerCapabilities(),
+          serverInfo: Implementation(name: 'TestServer', version: '2.0.0'),
+        );
+      var handlerCalled = false;
+      client.onSamplingRequest = (params) async {
+        handlerCalled = true;
+        return const CreateMessageResult(
+          model: 'test-model',
+          role: SamplingMessageRole.assistant,
+          content: SamplingTextContent(text: 'response'),
+        );
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.receiveMessage(
+        JsonRpcCreateMessageRequest(
+          id: 7,
+          createParams: const CreateMessageRequest(
+            messages: [
+              SamplingMessage(
+                role: SamplingMessageRole.user,
+                content: SamplingTextContent(text: 'Choose a tool'),
+              ),
+            ],
+            maxTokens: 32,
+            toolChoice: ToolChoice(mode: ToolChoiceMode.auto),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(handlerCalled, isFalse);
+      expect(transport.sentMessages.single, isA<JsonRpcError>());
+      final error = transport.sentMessages.single as JsonRpcError;
+      expect(error.id, 7);
+      expect(error.error.code, ErrorCode.invalidRequest.value);
+      expect(error.error.message, contains('sampling.tools'));
+    });
+
+    test('sampling tools request succeeds when sampling.tools is declared',
+        () async {
+      final client = Client(
+        const Implementation(name: 'TestClient', version: '1.0.0'),
+        options: const McpClientOptions(
+          capabilities: ClientCapabilities(
+            sampling: ClientCapabilitiesSampling(tools: true),
+          ),
+        ),
+      );
+      final transport = MockTransport()
+        ..mockInitializeResponse = const InitializeResult(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ServerCapabilities(),
+          serverInfo: Implementation(name: 'TestServer', version: '2.0.0'),
+        );
+      var handlerCalled = false;
+      client.onSamplingRequest = (params) async {
+        handlerCalled = true;
+        expect(params.tools?.single.name, 'search');
+        return const CreateMessageResult(
+          model: 'test-model',
+          role: SamplingMessageRole.assistant,
+          content: SamplingTextContent(text: 'response'),
+        );
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.receiveMessage(
+        JsonRpcCreateMessageRequest(
+          id: 'sample-2',
+          createParams: const CreateMessageRequest(
+            messages: [
+              SamplingMessage(
+                role: SamplingMessageRole.user,
+                content: SamplingTextContent(text: 'Use a tool'),
+              ),
+            ],
+            maxTokens: 32,
+            tools: [
+              Tool(name: 'search', inputSchema: JsonObject()),
+            ],
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(handlerCalled, isTrue);
+      expect(transport.sentMessages.single, isA<JsonRpcResponse>());
+      expect((transport.sentMessages.single as JsonRpcResponse).id, 'sample-2');
     });
 
     test('elicitation/create handler requires elicitation capability', () {

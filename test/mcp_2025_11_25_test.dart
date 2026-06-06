@@ -72,8 +72,12 @@ void main() {
         icons: icons,
       );
       expect(tool.icon?.data, 'base64');
-      expect(tool.toJson()['icon']['data'], 'base64');
+      expect(tool.toJson().containsKey('icon'), isFalse);
       expect((tool.toJson()['icons'] as List).first['theme'], 'dark');
+      expect(
+        Tool.fromJson({...tool.toJson(), 'icon': icon.toJson()}).icon?.data,
+        'base64',
+      );
 
       final resource = Resource(
         uri: 'file://test',
@@ -82,8 +86,14 @@ void main() {
         icons: icons,
       );
       expect(resource.icon?.data, 'base64');
-      expect(resource.toJson()['icon']['data'], 'base64');
+      expect(resource.toJson().containsKey('icon'), isFalse);
       expect((resource.toJson()['icons'] as List).first['theme'], 'dark');
+      expect(
+        Resource.fromJson(
+          {...resource.toJson(), 'icon': icon.toJson()},
+        ).icon?.data,
+        'base64',
+      );
 
       final prompt = Prompt(
         name: 'test-prompt',
@@ -91,8 +101,12 @@ void main() {
         icons: icons,
       );
       expect(prompt.icon?.data, 'base64');
-      expect(prompt.toJson()['icon']['data'], 'base64');
+      expect(prompt.toJson().containsKey('icon'), isFalse);
       expect((prompt.toJson()['icons'] as List).first['theme'], 'dark');
+      expect(
+        Prompt.fromJson({...prompt.toJson(), 'icon': icon.toJson()}).icon?.data,
+        'base64',
+      );
 
       final template = ResourceTemplate(
         uriTemplate: 'file:///test/{id}',
@@ -101,8 +115,14 @@ void main() {
         icons: icons,
       );
       expect(template.icon?.data, 'base64');
-      expect(template.toJson()['icon']['data'], 'base64');
+      expect(template.toJson().containsKey('icon'), isFalse);
       expect((template.toJson()['icons'] as List).first['theme'], 'dark');
+      expect(
+        ResourceTemplate.fromJson(
+          {...template.toJson(), 'icon': icon.toJson()},
+        ).icon?.data,
+        'base64',
+      );
     });
 
     test('BaseMetadata title fields are supported', () {
@@ -155,20 +175,82 @@ void main() {
       expect(deserializedPrompt.arguments?.single.title, 'Argument Title');
     });
 
+    test('CompleteRequest supports context arguments and prompt title', () {
+      final request = const CompleteRequest(
+        ref: PromptReference(
+          name: 'translate',
+          title: 'Translate prompt',
+        ),
+        argument: ArgumentCompletionInfo(
+          name: 'target_language',
+          value: 'Spa',
+        ),
+        context: CompletionContext(
+          arguments: {
+            'source_language': 'English',
+            'formality': 'formal',
+          },
+        ),
+      );
+
+      final json = request.toJson();
+      expect(json['ref']['type'], 'ref/prompt');
+      expect(json['ref']['name'], 'translate');
+      expect(json['ref']['title'], 'Translate prompt');
+      expect(json['context']['arguments']['source_language'], 'English');
+      expect(json['context']['arguments']['formality'], 'formal');
+
+      final deserialized = CompleteRequest.fromJson(json);
+      final ref = deserialized.ref as PromptReference;
+      expect(ref.name, 'translate');
+      expect(ref.title, 'Translate prompt');
+      expect(deserialized.context?.arguments, {
+        'source_language': 'English',
+        'formality': 'formal',
+      });
+
+      final message = JsonRpcMessage.fromJson({
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'completion/complete',
+        'params': json,
+      });
+      expect(message, isA<JsonRpcCompleteRequest>());
+
+      final completeRequest = message as JsonRpcCompleteRequest;
+      final promptRef = completeRequest.completeParams.ref as PromptReference;
+      expect(promptRef.title, 'Translate prompt');
+      expect(completeRequest.completeParams.context?.arguments, {
+        'source_language': 'English',
+        'formality': 'formal',
+      });
+      expect(
+        completeRequest.toJson()['params']['context']['arguments'],
+        {
+          'source_language': 'English',
+          'formality': 'formal',
+        },
+      );
+    });
+
     test('Elicitation with URL', () {
-      final params = const ElicitRequestParams(
+      final params = const ElicitRequestParams.url(
         message: 'test',
-        requestedSchema: JsonObject(),
         url: 'https://example.com/ui',
+        elicitationId: 'ui-123',
       );
 
       expect(params.url, 'https://example.com/ui');
+      expect(params.elicitationId, 'ui-123');
 
       final json = params.toJson();
+      expect(json['mode'], 'url');
       expect(json['url'], 'https://example.com/ui');
+      expect(json['elicitationId'], 'ui-123');
 
       final deserialized = ElicitRequestParams.fromJson(json);
       expect(deserialized.url, 'https://example.com/ui');
+      expect(deserialized.elicitationId, 'ui-123');
     });
 
     test('JsonEnum SEP-1330', () {
@@ -185,8 +267,10 @@ void main() {
 
       final json = schema.toJson();
       expect(json['type'], 'string');
-      expect(json['enum'], ['simple', 'complex']);
-      expect(json['enumNames'], ['simple', 'Complex Option']);
+      expect(json['oneOf'], [
+        {'const': 'simple'},
+        {'const': 'complex', 'title': 'Complex Option'},
+      ]);
       expect(json.containsKey('values'), isFalse);
 
       final deserialized = JsonEnum.fromJson(json);
@@ -205,10 +289,14 @@ void main() {
       expect(annotations.audience, contains('user'));
 
       final json = annotations.toJson();
-      expect(json['priority'], 0.5);
-      expect(json['audience'], contains('assistant'));
+      expect(json.containsKey('priority'), isFalse);
+      expect(json.containsKey('audience'), isFalse);
 
-      final deserialized = ToolAnnotations.fromJson(json);
+      final deserialized = ToolAnnotations.fromJson({
+        ...json,
+        'priority': 0.5,
+        'audience': ['user', 'assistant'],
+      });
       expect(deserialized.priority, 0.5);
       expect(deserialized.audience, contains('user'));
     });
@@ -335,6 +423,7 @@ void main() {
         taskId: '123',
         status: TaskStatus.working,
         createdAt: '2025-01-01T00:00:00Z',
+        lastUpdatedAt: '2025-01-01T00:01:00Z',
         ttl: 3600,
       );
       expect(task.status, TaskStatus.working);
@@ -524,6 +613,7 @@ void main() {
             ttl: 7200,
             pollInterval: 1000,
             createdAt: '2025-01-15T10:00:00Z',
+            lastUpdatedAt: '2025-01-15T10:01:00Z',
           ),
         );
 
@@ -565,12 +655,119 @@ void main() {
         expect(deserialized.status, TaskStatus.completed);
       });
 
+      test('TaskStatusNotificationParams requires full Task fields', () {
+        final params = const TaskStatusNotificationParams(
+          taskId: 'task-no-expiry',
+          status: TaskStatus.working,
+          ttl: null,
+          createdAt: '2025-01-15T10:00:00Z',
+          lastUpdatedAt: '2025-01-15T10:01:00Z',
+        );
+
+        final json = params.toJson();
+        expect(json, containsPair('ttl', null));
+        expect(json['createdAt'], '2025-01-15T10:00:00Z');
+        expect(json['lastUpdatedAt'], '2025-01-15T10:01:00Z');
+
+        expect(
+          () => const TaskStatusNotificationParams(
+            taskId: 'task-missing-created',
+            status: TaskStatus.working,
+            ttl: null,
+            lastUpdatedAt: '2025-01-15T10:01:00Z',
+          ).toJson(),
+          throwsA(isA<StateError>()),
+        );
+        expect(
+          () => const TaskStatusNotificationParams(
+            taskId: 'task-missing-updated',
+            status: TaskStatus.working,
+            ttl: null,
+            createdAt: '2025-01-15T10:00:00Z',
+          ).toJson(),
+          throwsA(isA<StateError>()),
+        );
+
+        for (final field in ['ttl', 'createdAt', 'lastUpdatedAt']) {
+          final malformed = Map<String, dynamic>.from(json)..remove(field);
+          expect(
+            () => TaskStatusNotificationParams.fromJson(malformed),
+            throwsA(isA<FormatException>()),
+            reason: 'missing $field should be rejected',
+          );
+          expect(
+            () => JsonRpcMessage.fromJson({
+              'jsonrpc': '2.0',
+              'method': 'notifications/tasks/status',
+              'params': malformed,
+            }),
+            throwsA(isA<FormatException>()),
+            reason: 'missing $field should fail at the JSON-RPC boundary',
+          );
+        }
+
+        expect(
+          () => TaskStatusNotificationParams.fromJson(
+            Map<String, dynamic>.from(json)..remove('ttl'),
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'TaskStatusNotification.ttl is required',
+            ),
+          ),
+        );
+        expect(
+          () => TaskStatusNotificationParams.fromJson({
+            ...json,
+            'createdAt': 42,
+          }),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'TaskStatusNotification.createdAt must be a string',
+            ),
+          ),
+        );
+        expect(
+          () => TaskStatusNotificationParams.fromJson({
+            ...json,
+            'pollInterval': '1000',
+          }),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'TaskStatusNotification.pollInterval must be an integer or null',
+            ),
+          ),
+        );
+        expect(
+          () => TaskStatusNotificationParams.fromJson({
+            ...json,
+            'statusMessage': 42,
+          }),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'TaskStatusNotification.statusMessage must be a string',
+            ),
+          ),
+        );
+      });
+
       test('JsonRpcTaskStatusNotification serialization', () {
         final notification = JsonRpcTaskStatusNotification(
           statusParams: const TaskStatusNotificationParams(
             taskId: 'task-status-456',
             status: TaskStatus.failed,
             statusMessage: 'Task failed due to error',
+            createdAt: '2025-01-15T10:00:00Z',
+            lastUpdatedAt: '2025-01-15T10:05:00Z',
+            ttl: null,
           ),
         );
 
@@ -582,6 +779,9 @@ void main() {
         expect(json['method'], 'notifications/tasks/status');
         expect(json['params']['taskId'], 'task-status-456');
         expect(json['params']['status'], 'failed');
+        expect(json['params'], containsPair('ttl', null));
+        expect(json['params']['createdAt'], '2025-01-15T10:00:00Z');
+        expect(json['params']['lastUpdatedAt'], '2025-01-15T10:05:00Z');
 
         final deserialized = JsonRpcTaskStatusNotification.fromJson(json);
         expect(deserialized.statusParams.taskId, 'task-status-456');
@@ -596,6 +796,9 @@ void main() {
             'taskId': 'task-abc',
             'status': 'input_required',
             'statusMessage': 'Waiting for user input',
+            'createdAt': '2025-01-15T10:00:00Z',
+            'lastUpdatedAt': '2025-01-15T10:05:00Z',
+            'ttl': null,
           },
         };
         final message = JsonRpcMessage.fromJson(json);
@@ -676,6 +879,151 @@ void main() {
         );
       });
 
+      test('Task omits null optional pollInterval but keeps required ttl', () {
+        final task = const Task(
+          taskId: 'cancelled-task',
+          status: TaskStatus.cancelled,
+          ttl: null,
+          createdAt: '2025-01-15T10:00:00Z',
+          lastUpdatedAt: '2025-01-15T10:01:00Z',
+        );
+
+        final json = task.toJson();
+        expect(json, containsPair('ttl', null));
+        expect(json, isNot(contains('pollInterval')));
+      });
+
+      test('Task rejects missing MCP-required fields', () {
+        expect(
+          () => Task.fromJson({
+            'taskId': 'missing-ttl',
+            'status': 'working',
+            'createdAt': '2025-01-15T10:00:00Z',
+            'lastUpdatedAt': '2025-01-15T10:01:00Z',
+          }),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => Task.fromJson({
+            'taskId': 'missing-created-at',
+            'status': 'working',
+            'ttl': null,
+            'lastUpdatedAt': '2025-01-15T10:01:00Z',
+          }),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => Task.fromJson({
+            'taskId': 'missing-last-updated-at',
+            'status': 'working',
+            'ttl': null,
+            'createdAt': '2025-01-15T10:00:00Z',
+          }),
+          throwsA(isA<FormatException>()),
+        );
+      });
+
+      test('Task rejects malformed field types with FormatException', () {
+        final validJson = {
+          'taskId': 'typed-task',
+          'status': 'working',
+          'ttl': null,
+          'createdAt': '2025-01-15T10:00:00Z',
+          'lastUpdatedAt': '2025-01-15T10:01:00Z',
+        };
+
+        expect(
+          () => Task.fromJson({...validJson, 'createdAt': 42}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.createdAt must be a string',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'taskId': 42}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.taskId must be a string',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'status': false}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.status must be a string',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson}..remove('taskId')),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.taskId is required',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson}..remove('status')),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.status is required',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'lastUpdatedAt': false}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.lastUpdatedAt must be a string',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'ttl': 1.5}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.ttl must be an integer or null',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'pollInterval': '1000'}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.pollInterval must be an integer or null',
+            ),
+          ),
+        );
+        expect(
+          () => Task.fromJson({...validJson, 'statusMessage': 42}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              'Task.statusMessage must be a string',
+            ),
+          ),
+        );
+      });
+
       test('Task all fields serialization', () {
         final task = const Task(
           taskId: 'full-task',
@@ -702,6 +1050,278 @@ void main() {
         expect(deserialized.taskId, 'full-task');
         expect(deserialized.statusMessage, 'Processing data');
         expect(deserialized.meta, {'custom': 'value'});
+      });
+    });
+
+    group('Spec gap regressions', () {
+      test('metadata helpers emit stable 2025-11-25 shapes', () {
+        final root = Root(
+          uri: 'file:///workspace',
+          name: 'workspace',
+          meta: {'scope': 'repo'},
+        );
+        expect(root.toJson()['_meta'], {'scope': 'repo'});
+
+        final resource = const Resource(
+          uri: 'file:///workspace/file.txt',
+          name: 'file',
+          size: 123,
+          annotations: ResourceAnnotations(title: 'legacy-title'),
+        );
+        final resourceJson = resource.toJson();
+        expect(resourceJson['size'], 123);
+        expect(resourceJson['annotations'], isNot(contains('title')));
+        expect(
+          ResourceAnnotations.fromJson({
+            'title': 'legacy-title',
+            'priority': 0.5,
+          }).title,
+          'legacy-title',
+        );
+      });
+
+      test('server capabilities omit non-stable fields while parsing legacy',
+          () {
+        final capabilities = const ServerCapabilities(
+          tasks: ServerCapabilitiesTasks(listChanged: true),
+          elicitation: ServerCapabilitiesElicitation.formOnly(),
+        );
+
+        final json = capabilities.toJson();
+        expect(json['tasks'], isNot(contains('listChanged')));
+        expect(json.containsKey('elicitation'), isFalse);
+
+        final parsed = ServerCapabilities.fromJson({
+          'tasks': {'listChanged': true},
+          'elicitation': {
+            'form': {},
+          },
+        });
+        expect(parsed.tasks?.listChanged, isTrue);
+        expect(parsed.elicitation?.form, isNotNull);
+      });
+
+      test('JSON-RPC response id follows MCP result/error schema', () {
+        expect(
+          () => JsonRpcMessage.fromJson({
+            'jsonrpc': '2.0',
+            'id': null,
+            'result': {},
+          }),
+          throwsA(isA<FormatException>()),
+        );
+
+        final error = JsonRpcError(
+          id: null,
+          error: JsonRpcErrorData(
+            code: ErrorCode.invalidRequest.value,
+            message: 'Invalid request',
+          ),
+        ).toJson();
+        expect(error.containsKey('id'), isFalse);
+
+        final parsed = JsonRpcError.fromJson({
+          'jsonrpc': '2.0',
+          'error': {
+            'code': ErrorCode.invalidRequest.value,
+            'message': 'Invalid request',
+          },
+        });
+        expect(parsed.id, isNull);
+      });
+
+      test('tool schemas must be object-root JSON Schema objects', () {
+        expect(
+          () => const Tool(
+            name: 'bad-tool',
+            inputSchema: JsonString(),
+          ).toJson(),
+          throwsA(isA<ArgumentError>()),
+        );
+
+        expect(
+          () => Tool.fromJson({
+            'name': 'bad-tool',
+            'inputSchema': {'type': 'string'},
+          }),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => Tool.fromJson({'name': 'missing-schema'}),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              contains('Tool.inputSchema is required'),
+            ),
+          ),
+        );
+        expect(
+          () => Tool.fromJson({
+            'name': 'bad-input-schema',
+            'inputSchema': 'not-an-object',
+          }),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              contains('Tool.inputSchema must be an object'),
+            ),
+          ),
+        );
+        expect(
+          () => Tool.fromJson({
+            'name': 'bad-output-schema',
+            'inputSchema': {'type': 'object'},
+            'outputSchema': 'not-an-object',
+          }),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'message',
+              contains('Tool.outputSchema must be an object'),
+            ),
+          ),
+        );
+      });
+
+      test('elicitation validates restricted form and result wire shapes', () {
+        final request = ElicitRequest.form(
+          message: 'Choose',
+          requestedSchema: JsonObject(
+            properties: {
+              'size': JsonSchema.string(enumValues: ['small', 'large']),
+            },
+            required: const ['size'],
+          ),
+        );
+        expect(request.toJson()['requestedSchema']['type'], 'object');
+
+        expect(
+          () => const ElicitRequest.form(
+            message: 'Nested',
+            requestedSchema: JsonObject(
+              properties: {'nested': JsonObject()},
+            ),
+          ).toJson(),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => ElicitResult.fromJson({
+            'action': 'accept',
+            'content': {
+              'bad': ['ok', 1],
+            },
+          }),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => const ElicitResult(
+            action: 'accept',
+            content: {
+              'bad': ['ok', 1],
+            },
+          ).toJson(),
+          throwsA(isA<ArgumentError>()),
+        );
+        expect(
+          () => URLElicitationRequiredErrorData.fromJson({
+            'elicitations': [
+              request.toJson(),
+            ],
+          }),
+          throwsA(isA<FormatException>()),
+        );
+      });
+
+      test('runtime value constraints are enforced without asserts', () {
+        expect(
+          () => Annotations(priority: 2).toJson(),
+          throwsA(anyOf(isA<AssertionError>(), isA<ArgumentError>())),
+        );
+        expect(
+          () => Annotations.fromJson({'priority': -0.1}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => CompletionResultData(
+            values: List.generate(101, (index) => '$index'),
+          ).toJson(),
+          throwsA(anyOf(isA<AssertionError>(), isA<ArgumentError>())),
+        );
+        expect(
+          () => CompletionResultData.fromJson({
+            'values': List.generate(101, (index) => '$index'),
+          }),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => Root(uri: 'https://example.com'),
+          throwsA(isA<ArgumentError>()),
+        );
+        expect(
+          () => ModelPreferences(costPriority: 2).toJson(),
+          throwsA(anyOf(isA<AssertionError>(), isA<ArgumentError>())),
+        );
+        expect(
+          () => ModelPreferences.fromJson({'costPriority': -1}),
+          throwsA(isA<FormatException>()),
+        );
+      });
+
+      test('bare task containers strip task metadata', () {
+        const task = Task(
+          taskId: 'task-1',
+          status: TaskStatus.working,
+          ttl: null,
+          createdAt: '2025-01-15T10:00:00Z',
+          lastUpdatedAt: '2025-01-15T10:01:00Z',
+          meta: {'trace': 'result-only'},
+        );
+
+        expect(task.toJson(), contains('_meta'));
+        expect(
+          const ListTasksResult(tasks: [task]).toJson()['tasks'].single,
+          isNot(contains('_meta')),
+        );
+        expect(
+          const CreateTaskResult(task: task).toJson()['task'],
+          isNot(contains('_meta')),
+        );
+      });
+
+      test('strict incoming result arrays reject missing required lists', () {
+        expect(
+          () => ListRootsResult.fromJson({}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => ListResourcesResult.fromJson({}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => ListPromptsResult.fromJson({}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => ListToolsResult.fromJson({}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => ListTasksResult.fromJson({}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => CreateMessageRequest.fromJson({'maxTokens': 1}),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => SamplingToolResultContent.fromJson({
+            'toolUseId': 'tool-use-1',
+            'content': {'type': 'text', 'text': 'legacy'},
+          }),
+          throwsA(isA<FormatException>()),
+        );
       });
     });
   });

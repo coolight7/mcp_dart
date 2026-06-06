@@ -101,11 +101,11 @@ void main() {
       final errors = <Error>[];
       protocol.onerror = (error) => errors.add(error);
 
-      // Send progress notification with string progressToken (should be int)
+      // Send progress notification with an invalid progressToken type.
       transport.receiveMessage(
         JsonRpcProgressNotification(
           progressParams: const ProgressNotificationParams(
-            progressToken: 'invalid-token' as dynamic,
+            progressToken: false,
             progress: 50,
             total: 100,
           ),
@@ -114,9 +114,10 @@ void main() {
 
       await Future.delayed(const Duration(milliseconds: 50));
 
-      // Should have received an error
+      // Should have received a protocol decode error at the boundary.
       expect(errors.length, greaterThan(0));
-      expect(errors.first, isA<ArgumentError>());
+      expect(errors.first, isA<StateError>());
+      expect(errors.first.toString(), contains('progressToken'));
     });
 
     test('request with timeout times out correctly', () async {

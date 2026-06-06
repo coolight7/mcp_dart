@@ -3,6 +3,7 @@ import 'package:mcp_dart/src/shared/json_schema/json_schema_validator.dart';
 
 import 'package:mcp_dart/src/shared/logging.dart';
 import 'package:mcp_dart/src/shared/protocol.dart';
+import 'package:mcp_dart/src/shared/task_interfaces.dart';
 import 'package:mcp_dart/src/shared/tool_name_validation.dart';
 import 'package:mcp_dart/src/shared/transport.dart';
 import 'package:mcp_dart/src/shared/uri_template.dart';
@@ -15,6 +16,12 @@ final _logger = Logger("mcp_dart.server.mcp");
 
 /// Callback capable of providing completions for a partial value.
 typedef CompleteCallback = FutureOr<List<String>> Function(String value);
+
+/// Callback capable of providing completions with request context.
+typedef CompleteWithContextCallback = FutureOr<List<String>> Function(
+  String value,
+  CompletionContext? context,
+);
 
 IconTheme? _iconThemeFromString(String? theme) {
   return switch (theme) {
@@ -43,7 +50,24 @@ class CompletableDef {
   /// The callback to invoke to get completion suggestions.
   final CompleteCallback complete;
 
-  const CompletableDef({required this.complete});
+  /// Optional callback that also receives `completion/complete` context.
+  final CompleteWithContextCallback? completeWithContext;
+
+  const CompletableDef({
+    required this.complete,
+    this.completeWithContext,
+  });
+
+  FutureOr<List<String>> _completeValue(
+    String value,
+    CompletionContext? context,
+  ) {
+    final completeWithContext = this.completeWithContext;
+    if (completeWithContext != null) {
+      return completeWithContext(value, context);
+    }
+    return complete(value);
+  }
 }
 
 /// A field that supports auto-completion.
@@ -141,13 +165,31 @@ typedef CompleteResourceTemplateCallback = FutureOr<List<String>> Function(
   String currentValue,
 );
 
+/// Callback to complete a value within a resource template with request context.
+typedef CompleteResourceTemplateWithContextCallback = FutureOr<List<String>>
+    Function(
+  String currentValue,
+  CompletionContext? context,
+);
+
 /// Callback to list available tasks.
 typedef ListTasksCallback = FutureOr<ListTasksResult> Function(
   RequestHandlerExtra extra,
 );
 
+/// Legacy callback to cancel a running task without returning its final state.
+///
+/// Prefer [CancelTaskCallback] for MCP 2025-11-25-compatible `tasks/cancel`
+/// results.
+typedef LegacyCancelTaskCallback = FutureOr<void> Function(
+  String taskId,
+  RequestHandlerExtra extra,
+);
+
 /// Callback to cancel a running task.
-typedef CancelTaskCallback = FutureOr<void> Function(
+///
+/// Must return the final cancelled task state for the `tasks/cancel` result.
+typedef CancelTaskCallback = FutureOr<Task> Function(
   String taskId,
   RequestHandlerExtra extra,
 );
@@ -164,6 +206,23 @@ typedef TaskResultCallback = FutureOr<CallToolResult> Function(
   RequestHandlerExtra extra,
 );
 
+Map<String, dynamic> _relatedTaskMeta(String taskId) => {'taskId': taskId};
+
+CallToolResult _withRelatedTaskMeta(CallToolResult result, String taskId) {
+  final relatedTaskJson = _relatedTaskMeta(taskId);
+  final meta = Map<String, dynamic>.from(result.meta ?? {});
+  meta[relatedTaskMetadataKey] = relatedTaskJson;
+  meta[legacyRelatedTaskMetadataKey] = relatedTaskJson;
+
+  return CallToolResult(
+    content: result.content,
+    isError: result.isError,
+    structuredContent: result.structuredContent,
+    meta: meta,
+    extra: result.extra,
+  );
+}
+
 /// Registration details for a resource template.
 class ResourceTemplateRegistration {
   /// The URI template expander.
@@ -175,15 +234,34 @@ class ResourceTemplateRegistration {
   /// Callbacks to complete variables within the template.
   final Map<String, CompleteResourceTemplateCallback>? completeCallbacks;
 
+  /// Context-aware callbacks to complete variables within the template.
+  final Map<String, CompleteResourceTemplateWithContextCallback>?
+      completeCallbacksWithContext;
+
   ResourceTemplateRegistration(
     String templateString, {
     required this.listCallback,
     this.completeCallbacks,
+    this.completeCallbacksWithContext,
   }) : uriTemplate = UriTemplateExpander(templateString);
 
   /// Gets the completion callback for a specific variable.
   CompleteResourceTemplateCallback? getCompletionCallback(String variableName) {
     return completeCallbacks?[variableName];
+  }
+
+  FutureOr<List<String>>? _completeVariable(
+    String variableName,
+    String currentValue,
+    CompletionContext? context,
+  ) {
+    final completeWithContext = completeCallbacksWithContext?[variableName];
+    if (completeWithContext != null) {
+      return completeWithContext(currentValue, context);
+    }
+    final complete = completeCallbacks?[variableName];
+    if (complete == null) return null;
+    return complete(currentValue);
   }
 }
 
@@ -712,9 +790,38 @@ class ExperimentalMcpServerTasks {
     final effectiveExecution = ToolExecution(
       taskSupport: execution?.taskSupport ?? 'required',
     );
+    // Validate against the spec-defined wire values before advertising the tool.
+    effectiveExecution.toJson();
     if (effectiveExecution.taskSupport == 'forbidden') {
       throw ArgumentError(
         "Cannot register task-based tool '$name' with taskSupport 'forbidden'. Use registerTool() instead.",
+      );
+    }
+    if (_server._registeredTools.containsKey(name)) {
+      throw ArgumentError("Tool name '$name' already registered.");
+    }
+
+    final hasTaskToolCallCapability =
+        _server.server.getCapabilities().tasks?.requests?.tools?.call != null;
+    if (!hasTaskToolCallCapability) {
+      if (_server.isConnected) {
+        throw StateError(
+          "Cannot register task-based tool '$name' after connect() unless "
+          "server capabilities already include 'tasks.requests.tools.call'. "
+          "Configure ServerCapabilities.tasks.requests.tools.call before "
+          "connect() or register task-based tools before connecting.",
+        );
+      }
+      _server.server.registerCapabilities(
+        const ServerCapabilities(
+          tasks: ServerCapabilitiesTasks(
+            requests: ServerCapabilitiesTasksRequests(
+              tools: ServerCapabilitiesTasksTools(
+                call: ServerCapabilitiesTasksToolsCall(),
+              ),
+            ),
+          ),
+        ),
       );
     }
 
@@ -777,8 +884,38 @@ class ExperimentalMcpServerTasks {
     _server._ensureTaskHandlersInitialized();
   }
 
-  /// Registers a callback for cancelling a task.
-  void onCancelTask(CancelTaskCallback callback) {
+  /// Registers a legacy callback for cancelling a task.
+  ///
+  /// This keeps pre-MCP-2025-11-25 code source-compatible. The callback should
+  /// cancel the task; the server then calls the registered `onGetTask` callback
+  /// to return the final cancelled [Task] required by `tasks/cancel`.
+  @Deprecated(
+    'MCP 2025-11-25 requires tasks/cancel to return a Task. '
+    'Use onCancelTaskWithResult instead. '
+    'This compatibility shim will be removed in the next major release.',
+  )
+  void onCancelTask(LegacyCancelTaskCallback callback) {
+    _server._cancelTaskCallback = (taskId, extra) async {
+      await Future.value(callback(taskId, extra));
+
+      final getTask = _server._getTaskCallback;
+      if (getTask == null) {
+        throw McpError(
+          ErrorCode.invalidParams.value,
+          'Legacy onCancelTask requires onGetTask to resolve the cancelled task',
+        );
+      }
+      return Future.value(getTask(taskId, extra));
+    };
+    _server._ensureTaskHandlersInitialized();
+  }
+
+  /// Registers a callback for cancelling a task and returning its final state.
+  ///
+  /// The callback must cancel the task and return the final cancelled [Task]
+  /// used as the `tasks/cancel` result. Throw [McpError] if the task cannot
+  /// be cancelled, is missing, or is already terminal.
+  void onCancelTaskWithResult(CancelTaskCallback callback) {
     _server._cancelTaskCallback = callback;
     _server._ensureTaskHandlersInitialized();
   }
@@ -951,10 +1088,22 @@ class McpServer {
             "Task cancellation not supported",
           );
         }
-        await Future.value(
+        final task = await Future.value(
           _cancelTaskCallback!(request.cancelParams.taskId, extra),
         );
-        return const EmptyResult();
+        if (task.taskId != request.cancelParams.taskId) {
+          throw McpError(
+            ErrorCode.invalidParams.value,
+            "Cancelled task result has mismatched taskId",
+          );
+        }
+        if (task.status != TaskStatus.cancelled) {
+          throw McpError(
+            ErrorCode.invalidParams.value,
+            "Task cancellation callback must return a cancelled task",
+          );
+        }
+        return task;
       },
       (id, params, meta) => JsonRpcCancelTaskRequest.fromJson({
         'id': id,
@@ -983,7 +1132,10 @@ class McpServer {
         Method.tasksResult,
         (request, extra) async {
           final taskId = request.resultParams.taskId;
-          return await Future.value(_taskResultCallback!(taskId, extra));
+          final result = await Future.value(
+            _taskResultCallback!(taskId, extra),
+          );
+          return _withRelatedTaskMeta(result, taskId);
         },
         (id, params, meta) => JsonRpcTaskResultRequest.fromJson({
           'id': id,
@@ -1146,7 +1298,7 @@ class McpServer {
     server.assertCanSetRequestHandler(Method.completionComplete);
     server.registerCapabilities(
       const ServerCapabilities(
-        completions: ServerCapabilitiesCompletions(listChanged: true),
+        completions: ServerCapabilitiesCompletions(),
       ),
     );
     server.setRequestHandler<JsonRpcCompleteRequest>(
@@ -1155,10 +1307,12 @@ class McpServer {
         final ResourceReference r => _handleResourceCompletion(
             r,
             request.completeParams.argument,
+            request.completeParams.context,
           ),
         final PromptReference p => _handlePromptCompletion(
             p,
             request.completeParams.argument,
+            request.completeParams.context,
           ),
       },
       (id, params, meta) => JsonRpcCompleteRequest.fromJson({
@@ -1173,15 +1327,18 @@ class McpServer {
   Future<CompleteResult> _handlePromptCompletion(
     PromptReference ref,
     ArgumentCompletionInfo argInfo,
+    CompletionContext? context,
   ) async {
     final prompt = _registeredPrompts[ref.name];
     if (prompt == null || !prompt.enabled) return _emptyCompletionResult();
 
     final argDef = prompt.argsSchemaDefinition?[argInfo.name];
-    final completer = argDef?.completable?.def.complete;
+    final completer = argDef?.completable?.def;
     if (completer == null) return _emptyCompletionResult();
     try {
-      return _createCompletionResult(await completer(argInfo.value));
+      return _createCompletionResult(
+        await completer._completeValue(argInfo.value, context),
+      );
     } catch (e) {
       _logger.warn(
         "Error during prompt argument completion for '${ref.name}.${argInfo.name}': $e",
@@ -1193,6 +1350,7 @@ class McpServer {
   Future<CompleteResult> _handleResourceCompletion(
     ResourceReference ref,
     ArgumentCompletionInfo argInfo,
+    CompletionContext? context,
   ) async {
     final templateEntry = _registeredResourceTemplates.entries.firstWhere(
       (e) => e.value.resourceTemplate.uriTemplate.toString() == ref.uri,
@@ -1203,11 +1361,15 @@ class McpServer {
     );
     if (!templateEntry.value.enabled) return _emptyCompletionResult();
 
-    final completer = templateEntry.value.resourceTemplate
-        .getCompletionCallback(argInfo.name);
-    if (completer == null) return _emptyCompletionResult();
     try {
-      return _createCompletionResult(await completer(argInfo.value));
+      final completions =
+          templateEntry.value.resourceTemplate._completeVariable(
+        argInfo.name,
+        argInfo.value,
+        context,
+      );
+      if (completions == null) return _emptyCompletionResult();
+      return _createCompletionResult(await completions);
     } catch (e) {
       _logger.warn(
         "Error during resource template completion for '${ref.uri}' variable '${argInfo.name}': $e",

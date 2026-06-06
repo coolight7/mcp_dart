@@ -7,12 +7,22 @@ on:
   pull_request:
     paths:
       - 'packages/mcp_dart_cli/**'
+      - 'test/interop/python/**'
+      - 'test/interop/ts/**'
+      - 'tool/install.sh'
+      - 'tool/install.ps1'
+      - '.github/workflows/cli_binaries.yml'
       - '.github/workflows/test_cli.yml'
   push:
     branches:
       - main
     paths:
       - 'packages/mcp_dart_cli/**'
+      - 'test/interop/python/**'
+      - 'test/interop/ts/**'
+      - 'tool/install.sh'
+      - 'tool/install.ps1'
+      - '.github/workflows/cli_binaries.yml'
       - '.github/workflows/test_cli.yml'
 
 jobs:
@@ -24,36 +34,77 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Dart
         uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install TS interop dependencies
+        working-directory: test/interop/ts
+        run: npm ci
+
+      - name: Build TS interop fixtures
+        working-directory: test/interop/ts
+        run: npm run build
+
+      - name: Install Python interop dependencies
+        working-directory: .
+        run: python -m pip install -r test/interop/python/requirements.txt
+
       - name: Install dependencies
         run: dart pub get
+
+      - name: Validate standalone installers
+        working-directory: .
+        run: |
+          sh -n tool/install.sh
+          pwsh -NoLogo -NoProfile -Command "\$ErrorActionPreference = 'Stop'; \$errors = \$null; [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw tool/install.ps1), [ref]\$errors); if (\$errors) { throw \$errors[0] }"
 
       - name: Analyze project
         run: dart analyze
 
-      - name: Run tests
-        run: dart test
+      - name: Run tests with coverage
+        run: |
+          dart pub global activate coverage
+          dart pub global run coverage:test_with_coverage
+
+      - name: Run MCP spec conformance gate
+        run: dart run bin/mcp_dart.dart conformance --suite all --json
 
       - name: Run pana (package analysis)
         run: |
           dart pub global activate pana
+          set +e
           dart pub global run pana --json --no-warning --exit-code-threshold 0 > pana_output.json
+          PANA_EXIT=$?
+          set -e
           # Filter out log lines and extract scores from the summary
-          RESULT=$(cat pana_output.json | grep -v '^{"logName"')
-          SCORE=$(echo "$RESULT" | grep -o '"grantedPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$')
-          MAX_POINTS=$(echo "$RESULT" | grep -o '"maxPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$')
+          RESULT=$(grep -v '^{"logName"' pana_output.json || true)
+          SCORE=$(echo "$RESULT" | grep -o '"grantedPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$' || true)
+          MAX_POINTS=$(echo "$RESULT" | grep -o '"maxPoints": *[0-9]*' | tail -1 | grep -o '[0-9]*$' || true)
           echo "Pana score: $SCORE/$MAX_POINTS"
           # We might want to enforce a threshold, e.g. 130 or 140 initially.
           # For now, let's strict check if it matches expectation or just warn.
           # Given the previous task aimed for 160/160, let's keep it strict but maybe allow slight dev.
           # For this initial workflow file, I will fail if not max points to maintain quality.
-          if [ "$SCORE" != "$MAX_POINTS" ]; then
+          if [ "$PANA_EXIT" -ne 0 ] || [ "$SCORE" != "$MAX_POINTS" ]; then
+            if grep -q 'depends on mcp_dart .*which doesn.*t match any versions' pana_output.json; then
+              echo "::warning::Skipping strict CLI pana score because this PR prepares the CLI against an unpublished mcp_dart release. Publish mcp_dart first, then rerun pana before publishing mcp_dart_cli."
+              exit 0
+            fi
+            echo "pana exited with code $PANA_EXIT."
             echo "Error: Package score is $SCORE/$MAX_POINTS."
             echo ""
             echo "Detailed report:"
@@ -61,3 +112,13 @@ jobs:
             exit 1
           fi
           echo "✓ Package achieves perfect score"
+
+      - name: Upload coverage to Codecov
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]' }}
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: packages/mcp_dart_cli/coverage/lcov.info
+          flags: cli
+          name: codecov-cli
+          fail_ci_if_error: true

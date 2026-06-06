@@ -168,7 +168,7 @@ Tools allow clients to execute actions through your server.
 server.registerTool(
   'echo',
   description: 'Echo back a message',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'message': JsonSchema.string(),
     },
@@ -189,7 +189,7 @@ server.registerTool(
 server.registerTool(
   'search-database',
   description: 'Search database with filters',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'query': JsonSchema.string(description: 'Search query'),
       'filters': JsonSchema.object(
@@ -236,7 +236,7 @@ For long-running operations, you can report progress back to the client:
 ```dart
 server.registerTool(
   'long-task',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     for (var i = 0; i < 100; i++) {
       await Future.delayed(Duration(milliseconds: 100));
@@ -261,7 +261,7 @@ Provide hints about tool behavior:
 server.registerTool(
   'delete-user',
   description: 'Permanently delete a user account',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     // Delete logic
     return CallToolResult(
@@ -273,7 +273,7 @@ server.registerTool(
 server.registerTool(
   'get-user-info',
   description: 'Get user information',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     // Get logic
     return CallToolResult(
@@ -285,7 +285,7 @@ server.registerTool(
 server.registerTool(
   'update-cache',
   description: 'Update cache entry',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     // Update logic
     return CallToolResult(
@@ -297,7 +297,7 @@ server.registerTool(
 server.registerTool(
   'search-web',
   description: 'Search the web',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     // Search logic
     return CallToolResult(
@@ -313,7 +313,7 @@ server.registerTool(
 server.registerTool(
   'generate-report',
   description: 'Generate a report with chart',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     final report = await generateReport(args);
     final chart = await generateChart(report);
@@ -337,7 +337,7 @@ server.registerTool(
 server.registerTool(
   'latest-report',
   description: 'Return a link to the latest generated report',
-  inputSchema: ToolInputSchema(properties: {}),
+  inputSchema: JsonSchema.object(properties: {}),
   callback: (args, extra) async {
     return CallToolResult(
       content: [
@@ -359,7 +359,7 @@ server.registerTool(
 server.registerTool(
   'divide',
   description: 'Divide two numbers',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'a': JsonSchema.number(),
       'b': JsonSchema.number(),
@@ -430,6 +430,41 @@ server.registerResourceTemplate(
     final userId = vars['userId'];
     final profile = await database.getUserProfile(userId);
 
+    return ReadResourceResult(
+      contents: [
+        TextResourceContents(
+          uri: uri.toString(),
+          text: jsonEncode(profile),
+          mimeType: 'application/json',
+        ),
+      ],
+    );
+  },
+);
+```
+
+### Resource Template Completions
+
+Resource template completion callbacks can use `CompletionContext.arguments` to
+tailor suggestions based on other arguments the client already collected:
+
+```dart
+server.registerResourceTemplate(
+  'User Profile',
+  ResourceTemplateRegistration(
+    'users://{organization}/{userId}/profile',
+    listCallback: null,
+    completeCallbacksWithContext: {
+      'userId': (currentValue, context) async {
+        final organization = context?.arguments?['organization'];
+        return directory
+            .suggestUsers(organization: organization, prefix: currentValue);
+      },
+    },
+  ),
+  null,
+  (uri, vars, extra) async {
+    final profile = await database.getUserProfile(vars['userId']);
     return ReadResourceResult(
       contents: [
         TextResourceContents(
@@ -628,6 +663,44 @@ server.registerPrompt(
 );
 ```
 
+### Prompt Argument Completions
+
+Prompt argument completions can also receive the request context. Use
+`completeWithContext` when suggestions depend on other prompt arguments:
+
+```dart
+server.registerPrompt(
+  'translate',
+  description: 'Generate translation prompt',
+  argsSchema: {
+    'source_language': PromptArgumentDefinition(type: String),
+    'target_language': PromptArgumentDefinition(
+      type: String,
+      completable: CompletableField(
+        def: CompletableDef(
+          complete: (value) async => languageCatalog.suggest(value),
+          completeWithContext: (value, context) async {
+            final sourceLanguage = context?.arguments?['source_language'];
+            return languageCatalog.suggestTargets(
+              prefix: value,
+              sourceLanguage: sourceLanguage,
+            );
+          },
+        ),
+      ),
+    ),
+  },
+  callback: (args, extra) async => GetPromptResult(
+    messages: [
+      PromptMessage(
+        role: PromptMessageRole.user,
+        content: TextContent(text: 'Translate using $args'),
+      ),
+    ],
+  ),
+);
+```
+
 ### Multi-Message Prompts
 
 ```dart
@@ -729,16 +802,25 @@ server.experimental.onListTasks((extra) async {
       Task(
         taskId: 'task-1',
         status: TaskStatus.working,
+        statusMessage: 'Long operation is running',
+        ttl: null,
         createdAt: DateTime.now().toIso8601String(),
-        name: 'Long Operation',
-        description: 'A task that takes a long time',
+        lastUpdatedAt: DateTime.now().toIso8601String(),
       ),
     ],
   );
 });
 
-server.experimental.onCancelTask((taskId, extra) async {
+server.experimental.onCancelTaskWithResult((taskId, extra) async {
   // Logic to cancel the task
+  return Task(
+    taskId: taskId,
+    status: TaskStatus.cancelled,
+    statusMessage: 'Task cancelled',
+    ttl: null,
+    createdAt: DateTime.now().toIso8601String(),
+    lastUpdatedAt: DateTime.now().toIso8601String(),
+  );
 });
 
 server.experimental.onGetTask((taskId, extra) async {
@@ -746,7 +828,9 @@ server.experimental.onGetTask((taskId, extra) async {
   return Task(
     taskId: taskId,
     status: TaskStatus.working,
+    ttl: null,
     createdAt: DateTime.now().toIso8601String(),
+    lastUpdatedAt: DateTime.now().toIso8601String(),
   );
 });
 
@@ -954,7 +1038,7 @@ server.registerTool(
 
 ```dart
 // ✅ Good
-inputSchema: ToolInputSchema(
+inputSchema: JsonSchema.object(
   properties: {
     'query': JsonSchema.string(
       description: 'Search keywords',
@@ -970,7 +1054,7 @@ inputSchema: ToolInputSchema(
 )
 
 // ❌ Bad
-inputSchema: ToolInputSchema(
+inputSchema: JsonSchema.object(
   properties: {
     'query': JsonSchema.string(),
   },
@@ -981,7 +1065,7 @@ inputSchema: ToolInputSchema(
 
 ```dart
 // ✅ Good
-callback: (args) async {
+callback: (args, extra) async {
   try {
     final result = await riskyOperation(args);
     return CallToolResult(
@@ -996,7 +1080,7 @@ callback: (args) async {
 }
 
 // ❌ Bad - uncaught exceptions
-callback: (args) async {
+callback: (args, extra) async {
   final result = await riskyOperation(args);  // May throw!
   return CallToolResult(
     content: [TextContent(text: result)],

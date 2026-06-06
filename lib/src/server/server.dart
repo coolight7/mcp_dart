@@ -7,6 +7,13 @@ import 'package:mcp_dart/src/types.dart';
 
 final _logger = Logger("mcp_dart.server");
 
+enum _ServerLifecycleState {
+  uninitialized,
+  initializing,
+  initialized,
+  ready,
+}
+
 /// Options for configuring the MCP [McpServer].
 class McpServerOptions extends ProtocolOptions {
   /// Capabilities to advertise as being supported by this server.
@@ -37,6 +44,7 @@ typedef ServerOptions = McpServerOptions;
 class Server extends Protocol {
   ClientCapabilities? _clientCapabilities;
   Implementation? _clientVersion;
+  _ServerLifecycleState _lifecycleState = _ServerLifecycleState.uninitialized;
   ServerCapabilities _capabilities;
   final String? _instructions;
   final Implementation _serverInfo;
@@ -77,7 +85,10 @@ class Server extends Protocol {
 
     setNotificationHandler<JsonRpcInitializedNotification>(
       Method.notificationsInitialized,
-      (notification) async => oninitialized?.call(),
+      (notification) async {
+        oninitialized?.call();
+        _lifecycleState = _ServerLifecycleState.ready;
+      },
       (params, meta) => JsonRpcInitializedNotification.fromJson({
         'params': params,
         if (meta != null) '_meta': meta,
@@ -98,6 +109,117 @@ class Server extends Protocol {
         }),
       );
     }
+  }
+
+  void _resetSessionState() {
+    _clientCapabilities = null;
+    _clientVersion = null;
+    _lifecycleState = _ServerLifecycleState.uninitialized;
+    _loggingLevels.clear();
+  }
+
+  @override
+  McpError? validateIncomingRequest(JsonRpcRequest request) {
+    if (request.method == Method.initialize) {
+      if (_lifecycleState != _ServerLifecycleState.uninitialized) {
+        return McpError(
+          ErrorCode.invalidRequest.value,
+          "Received duplicate initialize request.",
+        );
+      }
+      return null;
+    }
+
+    if (request.method == Method.ping) {
+      return null;
+    }
+
+    if (_lifecycleState == _ServerLifecycleState.uninitialized) {
+      return McpError(
+        ErrorCode.invalidRequest.value,
+        "Received ${request.method} before initialize; initialize must be the first interaction.",
+      );
+    }
+
+    if (_lifecycleState != _ServerLifecycleState.ready) {
+      return McpError(
+        ErrorCode.invalidRequest.value,
+        "Received ${request.method} before notifications/initialized.",
+      );
+    }
+
+    return null;
+  }
+
+  @override
+  McpError? validateIncomingNotification(JsonRpcNotification notification) {
+    switch (notification.method) {
+      case Method.notificationsCancelled:
+      case Method.notificationsProgress:
+        return null;
+      case Method.notificationsInitialized:
+        if (_lifecycleState == _ServerLifecycleState.uninitialized ||
+            _lifecycleState == _ServerLifecycleState.initializing) {
+          return McpError(
+            ErrorCode.invalidRequest.value,
+            "Received notifications/initialized before initialize.",
+          );
+        }
+        if (_lifecycleState == _ServerLifecycleState.ready) {
+          return McpError(
+            ErrorCode.invalidRequest.value,
+            "Received duplicate notifications/initialized.",
+          );
+        }
+        return null;
+      default:
+        if (_lifecycleState == _ServerLifecycleState.uninitialized) {
+          return McpError(
+            ErrorCode.invalidRequest.value,
+            "Received ${notification.method} before initialize; initialize must be the first interaction.",
+          );
+        }
+        if (_lifecycleState != _ServerLifecycleState.ready) {
+          return McpError(
+            ErrorCode.invalidRequest.value,
+            "Received ${notification.method} before notifications/initialized.",
+          );
+        }
+        return null;
+    }
+  }
+
+  @override
+  void onIncomingRequestAccepted(JsonRpcRequest request) {
+    if (request.method == Method.initialize) {
+      _lifecycleState = _ServerLifecycleState.initializing;
+    }
+  }
+
+  @override
+  void onIncomingRequestHandled(
+    JsonRpcRequest request,
+    BaseResultData result,
+  ) {
+    if (request.method == Method.initialize &&
+        _lifecycleState == _ServerLifecycleState.initializing) {
+      _lifecycleState = _ServerLifecycleState.initialized;
+    }
+  }
+
+  @override
+  void onIncomingRequestFailed(JsonRpcRequest request, Object error) {
+    if (request.method == Method.initialize &&
+        _lifecycleState == _ServerLifecycleState.initializing) {
+      _clientCapabilities = null;
+      _clientVersion = null;
+      _lifecycleState = _ServerLifecycleState.uninitialized;
+    }
+  }
+
+  @override
+  void onConnectionClosed() {
+    _resetSessionState();
   }
 
   /// Checks if a log message should be ignored based on the session's log level.
@@ -281,9 +403,14 @@ class Server extends Protocol {
         break;
 
       case Method.notificationsCompletionsListChanged:
-        if (!(_capabilities.completions?.listChanged ?? false)) {
+        throw StateError(
+          "$method is not part of stable MCP 2025-11-25. Use ${Method.notificationsExperimentalCompletionsListChanged} for extension behavior.",
+        );
+
+      case Method.notificationsExperimentalCompletionsListChanged:
+        if (_capabilities.completions == null) {
           throw StateError(
-            "Server does not support completion list changed notifications capability (required for sending $method)",
+            "Server does not support completions capability (required for sending $method)",
           );
         }
         break;
@@ -388,19 +515,39 @@ class Server extends Protocol {
 
   @override
   void assertTaskCapability(String method) {
-    if (_clientCapabilities?.tasks == null) {
+    final missingCapability = switch (method) {
+      Method.samplingCreateMessage =>
+        _clientCapabilities?.tasks?.requests?.sampling?.createMessage == null
+            ? 'tasks.requests.sampling.createMessage'
+            : null,
+      Method.elicitationCreate =>
+        _clientCapabilities?.tasks?.requests?.elicitation?.create == null
+            ? 'tasks.requests.elicitation.create'
+            : null,
+      _ =>
+        _clientCapabilities?.tasks == null ? 'tasks' : 'tasks.requests.$method',
+    };
+
+    if (missingCapability != null) {
       throw McpError(
         ErrorCode.invalidRequest.value,
-        "Client does not support tasks capability (required for task-based '$method')",
+        "Client does not support capability '$missingCapability' required for task-based '$method'",
       );
     }
   }
 
   @override
   void assertTaskHandlerCapability(String method) {
-    if (_capabilities.tasks == null) {
+    final missingCapability = switch (method) {
+      Method.toolsCall => _capabilities.tasks?.requests?.tools?.call == null
+          ? 'tasks.requests.tools.call'
+          : null,
+      _ => _capabilities.tasks == null ? 'tasks' : 'tasks.requests.$method',
+    };
+
+    if (missingCapability != null) {
       throw StateError(
-        "Server setup error: Cannot handle task-based '$method' without 'tasks' capability registered.",
+        "Server setup error: Cannot handle task-based '$method' without '$missingCapability' capability registered.",
       );
     }
   }
@@ -613,7 +760,13 @@ class Server extends Protocol {
     return notification(notif);
   }
 
-  /// Sends a `notifications/completions/list_changed` notification to the client.
+  /// Sends an experimental completion list-changed notification to the client.
+  ///
+  /// Stable MCP 2025-11-25 does not define a completion list-changed
+  /// notification or capability flag.
+  @Deprecated(
+    'Stable MCP 2025-11-25 does not define completion list-changed notifications.',
+  )
   Future<void> sendCompletionListChanged() {
     const notif = JsonRpcCompletionListChangedNotification();
     return notification(notif);

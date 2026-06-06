@@ -1,12 +1,17 @@
 import 'dart:async';
 
 import 'package:mcp_dart/src/shared/logging.dart';
-import 'package:mcp_dart/src/types.dart';
 import 'package:mcp_dart/src/shared/task_interfaces.dart';
+import 'package:mcp_dart/src/types.dart';
+import 'package:meta/meta.dart';
 
 import 'transport.dart';
 
 final _logger = Logger("mcp_dart.shared.protocol");
+
+bool _isProgressToken(Object? token) => token is int || token is String;
+
+final _lastProgressByExtra = Expando<double>();
 
 /// Callback for progress notifications.
 typedef ProgressCallback = void Function(Progress progress);
@@ -49,6 +54,10 @@ const Duration defaultRequestTimeout = Duration(milliseconds: 60000);
 /// Options that can be given per request.
 class RequestOptions {
   /// Callback for progress notifications from the remote end.
+  ///
+  /// When set, the protocol adds an integer progress token to outgoing request
+  /// metadata unless the request already carries an `int` or `String`
+  /// `progressToken`, which is preserved for callers that need a custom token.
   final ProgressCallback? onprogress;
 
   /// Signal to cancel an in-flight request.
@@ -168,6 +177,15 @@ class RequestHandlerExtra {
       return;
     }
 
+    final lastProgress = _lastProgressByExtra[this];
+    if (lastProgress != null && progress <= lastProgress) {
+      throw ArgumentError(
+        "Progress values must increase monotonically for request $requestId: "
+        "$progress <= $lastProgress.",
+      );
+    }
+    _lastProgressByExtra[this] = progress;
+
     final notification = JsonRpcProgressNotification(
       progressParams: ProgressNotification(
         progressToken: progressToken,
@@ -195,6 +213,9 @@ class _TimeoutInfo {
   /// Maximum total duration allowed, regardless of resets.
   final Duration? maxTotalTimeoutDuration;
 
+  /// Whether progress notifications reset the request timeout timer.
+  final bool resetOnProgress;
+
   /// Callback to execute when the timeout occurs.
   final void Function() onTimeout;
 
@@ -204,7 +225,25 @@ class _TimeoutInfo {
     required this.startTime,
     required this.timeoutDuration,
     this.maxTotalTimeoutDuration,
+    this.resetOnProgress = false,
     required this.onTimeout,
+  });
+}
+
+class _TaskAugmentedRequestState {
+  final int messageId;
+  final RequestId? relatedRequestId;
+  final AbortSignal? signal;
+  StreamSubscription? abortSubscription;
+  String? taskId;
+  bool cancelRequested = false;
+  Object? cancelReason;
+  bool cancelSent = false;
+
+  _TaskAugmentedRequestState({
+    required this.messageId,
+    required this.relatedRequestId,
+    required this.signal,
   });
 }
 
@@ -238,8 +277,14 @@ abstract class Protocol {
   /// Error handlers for outgoing requests, mapped by request ID.
   final Map<int, void Function(Error error)> _responseErrorHandlers = {};
 
-  /// Progress callbacks for outgoing requests, mapped by request ID.
-  final Map<int, ProgressCallback> _progressHandlers = {};
+  /// Progress callbacks for outgoing requests, mapped by progress token.
+  final Map<Object, ProgressCallback> _progressHandlers = {};
+
+  /// Progress tokens selected for outgoing requests, mapped by request ID.
+  final Map<int, Object> _requestProgressTokens = {};
+
+  /// Request IDs for active progress tokens, mapped by progress token.
+  final Map<Object, int> _progressTokenRequestIds = {};
 
   /// Timeout state for outgoing requests, mapped by request ID.
   final Map<int, _TimeoutInfo> _timeoutInfo = {};
@@ -253,14 +298,20 @@ abstract class Protocol {
   /// Task message queue implementation.
   final TaskMessageQueue? _taskMessageQueue;
 
-  /// Maps task IDs to progress tokens to keep handlers alive.
-  final Map<String, int> _taskProgressTokens = {};
-
   /// Set of notification methods currently pending debounce.
   final Set<String> _pendingDebouncedNotifications = {};
 
   /// Resolvers for side-channeled requests (via tasks).
   final Map<int, void Function(JsonRpcMessage response)> _requestResolvers = {};
+
+  /// Task-augmented outgoing requests whose lifecycle continues after the
+  /// initial CreateTaskResult response.
+  final Map<int, _TaskAugmentedRequestState> _taskRequestsByMessageId = {};
+  final Map<String, _TaskAugmentedRequestState> _taskRequestsByTaskId = {};
+
+  /// Terminal task statuses that arrived before their CreateTaskResult was
+  /// parsed and registered locally.
+  final Set<String> _earlyTerminalTaskIds = {};
 
   /// Callback invoked when the underlying transport connection is closed.
   void Function()? onclose;
@@ -309,7 +360,7 @@ abstract class Protocol {
     setRequestHandler<JsonRpcPingRequest>(
       "ping",
       (request, extra) async => const EmptyResult(),
-      (id, params, meta) => JsonRpcPingRequest(id: id),
+      (id, params, meta) => JsonRpcPingRequest(id: id, meta: meta),
     );
 
     if (_taskStore != null) {
@@ -473,21 +524,218 @@ abstract class Protocol {
     int messageId,
     Duration timeout,
     Duration? maxTotalTimeout,
+    bool resetOnProgress,
     void Function() onTimeout,
   ) {
+    final startTime = DateTime.now();
+    var initialTimeout = timeout;
+    if (maxTotalTimeout != null && maxTotalTimeout < initialTimeout) {
+      initialTimeout = maxTotalTimeout;
+    }
+
     final info = _TimeoutInfo(
-      timeoutTimer: Timer(timeout, onTimeout),
-      startTime: DateTime.now(),
+      timeoutTimer: Timer(initialTimeout, onTimeout),
+      startTime: startTime,
       timeoutDuration: timeout,
       maxTotalTimeoutDuration: maxTotalTimeout,
+      resetOnProgress: resetOnProgress,
       onTimeout: onTimeout,
     );
     _timeoutInfo[messageId] = info;
   }
 
+  void _resetTimeoutOnProgress(_TimeoutInfo timeoutInfo) {
+    if (!timeoutInfo.resetOnProgress) return;
+
+    var nextTimeout = timeoutInfo.timeoutDuration;
+    final maxTotalTimeout = timeoutInfo.maxTotalTimeoutDuration;
+    if (maxTotalTimeout != null) {
+      final elapsed = DateTime.now().difference(timeoutInfo.startTime);
+      final remaining = maxTotalTimeout - elapsed;
+      if (remaining <= Duration.zero) {
+        timeoutInfo.timeoutTimer.cancel();
+        timeoutInfo.onTimeout();
+        return;
+      }
+      if (remaining < nextTimeout) {
+        nextTimeout = remaining;
+      }
+    }
+
+    timeoutInfo.timeoutTimer.cancel();
+    timeoutInfo.timeoutTimer = Timer(nextTimeout, timeoutInfo.onTimeout);
+  }
+
   /// Cleans up the timeout state associated with a request ID.
   void _cleanupTimeout(int messageId) {
     _timeoutInfo.remove(messageId)?.timeoutTimer.cancel();
+  }
+
+  /// Removes progress bookkeeping for an outgoing request.
+  void _cleanupProgressHandler(int messageId) {
+    final progressToken = _requestProgressTokens.remove(messageId);
+    if (progressToken != null) {
+      _progressHandlers.remove(progressToken);
+      _progressTokenRequestIds.remove(progressToken);
+    }
+  }
+
+  bool get _hasUnidentifiedTaskRequests => _taskRequestsByMessageId.values.any(
+        (pendingState) => pendingState.taskId == null,
+      );
+
+  void _clearEarlyTerminalTaskIdsIfUnneeded() {
+    if (!_hasUnidentifiedTaskRequests) {
+      _earlyTerminalTaskIds.clear();
+    }
+  }
+
+  void _cleanupTaskAugmentedRequest(
+    _TaskAugmentedRequestState state, {
+    bool cleanupProgress = true,
+  }) {
+    _taskRequestsByMessageId.remove(state.messageId);
+    final taskId = state.taskId;
+    if (taskId != null) {
+      final currentState = _taskRequestsByTaskId[taskId];
+      if (identical(currentState, state)) {
+        _taskRequestsByTaskId.remove(taskId);
+      }
+    }
+    _clearEarlyTerminalTaskIdsIfUnneeded();
+    state.abortSubscription?.cancel();
+    state.abortSubscription = null;
+    if (cleanupProgress) {
+      _cleanupProgressHandler(state.messageId);
+    }
+  }
+
+  void _onTaskStatusNotification(JsonRpcTaskStatusNotification notification) {
+    if (!notification.statusParams.status.isTerminal) {
+      return;
+    }
+
+    final state = _taskRequestsByTaskId[notification.statusParams.taskId];
+    if (state != null) {
+      _cleanupTaskAugmentedRequest(state);
+    } else if (_hasUnidentifiedTaskRequests) {
+      _earlyTerminalTaskIds.add(notification.statusParams.taskId);
+    }
+  }
+
+  Object? _preTaskIdCancellationReason(
+    _TaskAugmentedRequestState? state,
+  ) {
+    if (state == null || state.taskId != null) {
+      return null;
+    }
+    if (state.cancelRequested) {
+      return state.cancelReason ?? AbortError("Request cancelled");
+    }
+    final signal = state.signal;
+    if (signal != null && signal.aborted) {
+      state.cancelRequested = true;
+      state.cancelReason = signal.reason ?? AbortError("Request cancelled");
+      return state.cancelReason;
+    }
+    return null;
+  }
+
+  void _handleTaskCancellationResponse(
+    _TaskAugmentedRequestState state,
+    JsonRpcMessage responseMessage,
+  ) {
+    switch (responseMessage) {
+      case final JsonRpcResponse response:
+        try {
+          final task = Task.fromJson(response.result);
+          if (task.taskId != state.taskId) {
+            _cleanupTaskAugmentedRequest(state);
+            _onerror(
+              StateError(
+                "Task cancellation response taskId mismatch: "
+                "expected ${state.taskId}, got ${task.taskId}",
+              ),
+            );
+          } else if (task.status.isTerminal) {
+            _cleanupTaskAugmentedRequest(state);
+          }
+        } catch (e) {
+          _cleanupTaskAugmentedRequest(state);
+          _onerror(
+            StateError(
+              "Failed to parse task cancellation result for task "
+              "${state.taskId}: $e",
+            ),
+          );
+        }
+      case final JsonRpcError error:
+        _cleanupTaskAugmentedRequest(state);
+        _onerror(
+          McpError(
+            error.error.code,
+            error.error.message,
+            error.error.data,
+          ),
+        );
+      default:
+        _onerror(
+          ArgumentError(
+            "Invalid task cancellation response type: "
+            "${responseMessage.runtimeType}",
+          ),
+        );
+    }
+  }
+
+  void _sendTaskCancellation(_TaskAugmentedRequestState state) {
+    final taskId = state.taskId;
+    if (taskId == null || state.cancelSent) {
+      return;
+    }
+    state.cancelSent = true;
+
+    final cancelRequest = JsonRpcCancelTaskRequest(
+      id: _requestMessageId++,
+      cancelParams: CancelTaskRequest(taskId: taskId),
+    );
+    _requestResolvers[cancelRequest.id as int] = (responseMessage) {
+      _handleTaskCancellationResponse(state, responseMessage);
+    };
+
+    _transport
+        ?.sendPreservingRequestId(
+      cancelRequest,
+      relatedRequestId: state.relatedRequestId,
+    )
+        .catchError((e) {
+      _requestResolvers.remove(cancelRequest.id);
+      _cleanupTaskAugmentedRequest(state);
+      _onerror(
+        StateError("Failed to send task cancellation for task $taskId: $e"),
+      );
+      return null;
+    });
+  }
+
+  Object _nextAvailableProgressToken(int preferredToken) {
+    var token = preferredToken;
+    while (_progressHandlers.containsKey(token)) {
+      token++;
+    }
+    return token;
+  }
+
+  Map<String, dynamic>? _mergeRelatedTaskMeta(
+    Map<String, dynamic>? meta,
+    Map<String, dynamic>? relatedTaskJson,
+  ) {
+    if (relatedTaskJson == null) return meta;
+
+    final finalMeta = Map<String, dynamic>.from(meta ?? {});
+    finalMeta[relatedTaskMetadataKey] = relatedTaskJson;
+    finalMeta[legacyRelatedTaskMetadataKey] = relatedTaskJson;
+    return finalMeta;
   }
 
   /// Sends a JSON-RPC error response for a given request ID.
@@ -530,19 +778,28 @@ abstract class Protocol {
     final errorHandlers = Map.of(_responseErrorHandlers);
     final pendingTimeouts = Map.of(_timeoutInfo);
     final pendingRequestHandlers = Map.of(_requestHandlerAbortControllers);
+    final pendingTaskRequests = Map.of(_taskRequestsByMessageId);
 
     _responseCompleters.clear();
     _responseErrorHandlers.clear();
     _progressHandlers.clear();
+    _requestProgressTokens.clear();
+    _progressTokenRequestIds.clear();
     _timeoutInfo.clear();
     _requestHandlerAbortControllers.clear();
-    _taskProgressTokens.clear();
     _pendingDebouncedNotifications.clear();
     _requestResolvers.clear();
+    _taskRequestsByMessageId.clear();
+    _taskRequestsByTaskId.clear();
+    _earlyTerminalTaskIds.clear();
     _transport = null;
+
+    onConnectionClosed();
 
     pendingTimeouts.forEach((_, info) => info.timeoutTimer.cancel());
     pendingRequestHandlers.forEach((_, controller) => controller.abort());
+    pendingTaskRequests
+        .forEach((_, state) => state.abortSubscription?.cancel());
 
     final error = McpError(
       ErrorCode.connectionClosed.value,
@@ -584,30 +841,186 @@ abstract class Protocol {
     }
   }
 
+  /// Returns an MCP error when an incoming request is not valid for the
+  /// current protocol state.
+  McpError? validateIncomingRequest(JsonRpcRequest request) => null;
+
+  /// Returns an MCP error when an incoming notification is not valid for the
+  /// current protocol state.
+  McpError? validateIncomingNotification(JsonRpcNotification notification) =>
+      null;
+
+  /// Subclass hook called after an incoming request has passed validation and
+  /// will be handled.
+  @protected
+  void onIncomingRequestAccepted(JsonRpcRequest request) {}
+
+  /// Subclass hook called after an incoming request handler has completed and
+  /// its response has been sent or enqueued.
+  @protected
+  void onIncomingRequestHandled(
+    JsonRpcRequest request,
+    BaseResultData result,
+  ) {}
+
+  /// Subclass hook called when an incoming request handler or response send
+  /// fails.
+  @protected
+  void onIncomingRequestFailed(JsonRpcRequest request, Object error) {}
+
+  /// Subclass hook called after protocol-owned state has been cleared for a
+  /// closed transport.
+  @protected
+  void onConnectionClosed() {}
+
   /// Handles incoming JSON-RPC notifications.
   void _onnotification(JsonRpcNotification notification) {
+    final validationError = validateIncomingNotification(notification);
+    if (validationError != null) {
+      _onerror(validationError);
+      return;
+    }
+
+    if (notification is JsonRpcTaskStatusNotification) {
+      _onTaskStatusNotification(notification);
+    }
+
     final handler = _notificationHandlers[notification.method] ??
         fallbackNotificationHandler;
     if (handler == null) {
       return;
     }
 
-    Future.microtask(() => handler(notification)).catchError((
-      error,
-      stackTrace,
-    ) {
+    // Start notification handlers immediately so lifecycle notifications affect
+    // subsequent messages that arrive in the same transport turn.
+    try {
+      handler(notification).catchError((error, stackTrace) {
+        _onerror(
+          StateError(
+            "Uncaught error in notification handler for ${notification.method}: $error\n$stackTrace",
+          ),
+        );
+        return null;
+      });
+    } catch (error, stackTrace) {
       _onerror(
         StateError(
           "Uncaught error in notification handler for ${notification.method}: $error\n$stackTrace",
         ),
       );
+    }
+  }
+
+  bool _containsTaskMetadata(Map<dynamic, dynamic>? value) {
+    return value?.containsKey('task') == true ||
+        value?.containsKey(relatedTaskMetadataKey) == true ||
+        value?.containsKey(legacyRelatedTaskMetadataKey) == true;
+  }
+
+  bool _hasTaskAugmentation(JsonRpcRequest request) {
+    final paramsMeta = request.params?['_meta'];
+    return _containsTaskMetadata(request.meta) ||
+        request.params?.containsKey('task') == true ||
+        (paramsMeta is Map && _containsTaskMetadata(paramsMeta));
+  }
+
+  Map<String, dynamic>? _withoutTaskMetadata(
+    Map<String, dynamic>? value, {
+    required bool removeRelatedTask,
+  }) {
+    if (value == null) {
       return null;
-    });
+    }
+
+    final hasTask = value.containsKey('task');
+    final hasRelatedTask = removeRelatedTask &&
+        (value.containsKey(relatedTaskMetadataKey) ||
+            value.containsKey(legacyRelatedTaskMetadataKey));
+    if (!hasTask && !hasRelatedTask) {
+      return value;
+    }
+
+    final copy = Map<String, dynamic>.from(value)..remove('task');
+    if (removeRelatedTask) {
+      copy
+        ..remove(relatedTaskMetadataKey)
+        ..remove(legacyRelatedTaskMetadataKey);
+    }
+    return copy.isEmpty ? null : copy;
+  }
+
+  Map<String, dynamic>? _withoutTaskAugmentedParams(
+    Map<String, dynamic>? params,
+  ) {
+    if (params == null) {
+      return null;
+    }
+
+    Map<String, dynamic>? copy;
+    if (params.containsKey('task')) {
+      copy = Map<String, dynamic>.from(params)..remove('task');
+    }
+
+    final meta = (copy ?? params)['_meta'];
+    if (meta is Map<String, dynamic>) {
+      final strippedMeta = _withoutTaskMetadata(meta, removeRelatedTask: true);
+      if (!identical(strippedMeta, meta)) {
+        copy ??= Map<String, dynamic>.from(params);
+        if (strippedMeta == null) {
+          copy.remove('_meta');
+        } else {
+          copy['_meta'] = strippedMeta;
+        }
+      }
+    }
+
+    return copy?.isEmpty == true ? null : copy ?? params;
+  }
+
+  JsonRpcRequest _withoutTaskAugmentation(JsonRpcRequest request) {
+    final params = _withoutTaskAugmentedParams(request.params);
+    final meta = _withoutTaskMetadata(request.meta, removeRelatedTask: true);
+    final json = <String, dynamic>{
+      'jsonrpc': '2.0',
+      'id': request.id,
+      'method': request.method,
+      if (params != null || meta != null)
+        'params': <String, dynamic>{
+          ...?params,
+          if (meta != null) '_meta': meta,
+        },
+    };
+    return JsonRpcMessage.fromJson(json) as JsonRpcRequest;
+  }
+
+  bool _canHandleTaskAugmentation(String method) {
+    try {
+      assertTaskHandlerCapability(method);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Handles incoming JSON-RPC requests.
   void _onrequest(JsonRpcRequest request) {
+    final validationError = validateIncomingRequest(request);
+    if (validationError != null) {
+      _sendErrorResponse(
+        request.id,
+        validationError.code,
+        validationError.message,
+        validationError.data,
+      );
+      return;
+    }
+
     final handler = _requestHandlers[request.method] ?? fallbackRequestHandler;
+
+    if (_hasTaskAugmentation(request) &&
+        !_canHandleTaskAugmentation(request.method)) {
+      request = _withoutTaskAugmentation(request);
+    }
 
     // Check for related task ID in metadata
     final meta =
@@ -646,7 +1059,8 @@ abstract class Protocol {
           : null,
       taskRequestedTtl:
           (request.params?['task'] as Map<String, dynamic>?)?['ttl'] as int?,
-      sendNotification: (notification, {relatedTask}) => this.notification(
+      sendNotification: (notification, {relatedTask}) =>
+          _notificationWithRequestId(
         notification,
         relatedTask: relatedTask,
         relatedRequestId: request.id,
@@ -668,11 +1082,11 @@ abstract class Protocol {
                   ? RelatedTaskMetadata(taskId: relatedTaskId)
                   : null),
         );
-        return this.request<T>(
+        return _requestWithRequestId<T>(
           req,
           resultFactory,
           newOptions,
-          request.id is int ? request.id as int : null,
+          request.id,
         );
       },
     );
@@ -695,6 +1109,8 @@ abstract class Protocol {
       }
     }
 
+    onIncomingRequestAccepted(request);
+
     if (relatedTaskId != null && _taskStore != null) {
       _taskStore!.updateTaskStatus(
         relatedTaskId,
@@ -713,7 +1129,7 @@ abstract class Protocol {
         final response = JsonRpcResponse(
           id: request.id,
           result: result.toJson(),
-          meta: result.meta,
+          meta: _mergeRelatedTaskMeta(result.meta, relatedTaskJson),
         );
 
         if (relatedTaskId != null && _taskMessageQueue != null) {
@@ -729,11 +1145,13 @@ abstract class Protocol {
         } else {
           await _transport?.send(response);
         }
+        onIncomingRequestHandled(request, result);
       },
       onError: (error, stackTrace) {
         if (abortController.signal.aborted) {
           return Future.value(null);
         }
+        onIncomingRequestFailed(request, error);
 
         int code = ErrorCode.internalError.value;
         String message = "Internal server error processing ${request.method}";
@@ -759,6 +1177,7 @@ abstract class Protocol {
         );
       },
     ).catchError((sendError) {
+      onIncomingRequestFailed(request, sendError);
       _onerror(
         StateError(
           "Failed to send response/error for request ${request.id}: $sendError",
@@ -775,31 +1194,25 @@ abstract class Protocol {
     final params = notification.progressParams;
     final progressToken = params.progressToken;
 
-    if (progressToken is! int) {
+    if (!_isProgressToken(progressToken)) {
       _onerror(
-        ArgumentError("Received non-integer progressToken: $progressToken"),
+        ArgumentError(
+          "Received invalid progressToken: $progressToken. Expected int or String.",
+        ),
       );
       return;
     }
-    final messageId = progressToken;
 
-    final progressHandler = _progressHandlers[messageId];
+    final progressHandler = _progressHandlers[progressToken];
     if (progressHandler == null) {
       return;
     }
 
-    final timeoutInfo = _timeoutInfo[messageId];
+    final requestId = _progressTokenRequestIds[progressToken];
+    final timeoutInfo = requestId != null ? _timeoutInfo[requestId] : null;
     if (timeoutInfo != null) {
-      // Determine if we should reset
-      // We don't have easy access to RequestOptions here without storing them,
-      // but in the original code we check `resetTimeoutOnProgress`
-      // For now, assume false unless we enhance `_TimeoutInfo` or lookup.
-      // The original code had `_getRequestOptionsFromTimeoutInfo` which returned null.
-      // If we want to support resetTimeoutOnProgress, we need to store it in `_TimeoutInfo` or a map.
+      _resetTimeoutOnProgress(timeoutInfo);
     }
-
-    // In strict TS implementation, `resetTimeoutOnProgress` is stored in `TimeoutInfo`.
-    // I will check `_resetTimeout` logic. It uses `_timeoutInfo`.
 
     try {
       final progressData = Progress(
@@ -810,7 +1223,7 @@ abstract class Protocol {
       progressHandler(progressData);
     } catch (e) {
       _onerror(
-        StateError("Error in progress handler for request $messageId: $e"),
+        StateError("Error in progress handler for token $progressToken: $e"),
       );
     }
   }
@@ -854,21 +1267,14 @@ abstract class Protocol {
     final errorHandler = _responseErrorHandlers.remove(messageId);
     _cleanupTimeout(messageId);
 
-    // Keep progress handler if it's a task response
-    bool isTaskResponse = false;
-    if (responseMessage is JsonRpcResponse) {
-      final result = responseMessage.result;
-      if (result['task'] is Map) {
-        final task = result['task'] as Map<String, dynamic>;
-        if (task['taskId'] is String) {
-          isTaskResponse = true;
-          _taskProgressTokens[task['taskId'] as String] = messageId;
-        }
+    final taskRequestState = _taskRequestsByMessageId[messageId];
+    final preserveTaskProgress =
+        taskRequestState != null && errorPayload == null;
+    if (!preserveTaskProgress) {
+      _cleanupProgressHandler(messageId);
+      if (taskRequestState != null) {
+        _cleanupTaskAugmentedRequest(taskRequestState, cleanupProgress: false);
       }
-    }
-
-    if (!isTaskResponse) {
-      _progressHandlers.remove(messageId);
     }
 
     if (completer == null || completer.isCompleted) {
@@ -876,7 +1282,18 @@ abstract class Protocol {
     }
 
     if (errorPayload != null) {
-      _handleResponseError(messageId, errorPayload, completer, errorHandler);
+      final cancellationReason = _preTaskIdCancellationReason(taskRequestState);
+      if (cancellationReason != null) {
+        try {
+          completer.completeError(cancellationReason);
+        } catch (e) {
+          _onerror(
+            StateError("Error completing cancelled request $messageId: $e"),
+          );
+        }
+      } else {
+        _handleResponseError(messageId, errorPayload, completer, errorHandler);
+      }
     } else if (responseMessage is JsonRpcResponse) {
       try {
         completer.complete(responseMessage);
@@ -928,6 +1345,20 @@ abstract class Protocol {
     RequestOptions? options,
     int? relatedRequestId,
   ]) {
+    return _requestWithRequestId(
+      requestData,
+      resultFactory,
+      options,
+      relatedRequestId,
+    );
+  }
+
+  Future<T> _requestWithRequestId<T extends BaseResultData>(
+    JsonRpcRequest requestData,
+    T Function(Map<String, dynamic> resultJson) resultFactory, [
+    RequestOptions? options,
+    RequestId? relatedRequestId,
+  ]) {
     if (_transport == null) {
       return Future.error(StateError("Not connected to a transport."));
     }
@@ -952,14 +1383,36 @@ abstract class Protocol {
     final messageId = _requestMessageId++;
     final completer = Completer<JsonRpcResponse>();
     Error? capturedError;
+    Object? progressToken;
 
     Map<String, dynamic>? finalMeta = requestData.meta;
     Map<String, dynamic>? finalParams = requestData.params;
 
     if (options?.onprogress != null) {
-      _progressHandlers[messageId] = options!.onprogress!;
       final currentMeta = Map<String, dynamic>.from(finalMeta ?? {});
-      currentMeta['progressToken'] = messageId;
+      final requestedProgressToken = currentMeta['progressToken'];
+      if (requestedProgressToken != null) {
+        if (!_isProgressToken(requestedProgressToken)) {
+          return Future.error(
+            ArgumentError(
+              'progressToken must be an int or String when onprogress is set.',
+            ),
+          );
+        }
+        progressToken = requestedProgressToken;
+      } else {
+        progressToken = _nextAvailableProgressToken(messageId);
+        currentMeta['progressToken'] = progressToken;
+      }
+      final token = progressToken!;
+      if (_progressHandlers.containsKey(token)) {
+        return Future.error(
+          ArgumentError('progressToken is already in use by another request.'),
+        );
+      }
+      _progressHandlers[token] = options!.onprogress!;
+      _requestProgressTokens[messageId] = token;
+      _progressTokenRequestIds[token] = messageId;
       finalMeta = currentMeta;
     }
 
@@ -987,12 +1440,55 @@ abstract class Protocol {
       meta: finalMeta,
     );
 
-    void cancel([Object? reason]) {
+    final taskRequestState = options?.task != null
+        ? _TaskAugmentedRequestState(
+            messageId: messageId,
+            relatedRequestId: relatedRequestId,
+            signal: options?.signal,
+          )
+        : null;
+    if (taskRequestState != null) {
+      _taskRequestsByMessageId[messageId] = taskRequestState;
+    }
+
+    void cancel(Object? reason, {bool fromTimeout = false}) {
+      final errorReason = reason ?? AbortError("Request cancelled");
+      final activeTaskState = taskRequestState;
+      if (activeTaskState != null) {
+        final alreadyCancelRequested = activeTaskState.cancelRequested;
+        if (!alreadyCancelRequested) {
+          activeTaskState.cancelRequested = true;
+          activeTaskState.cancelReason = errorReason;
+        }
+        if (activeTaskState.taskId != null) {
+          _sendTaskCancellation(activeTaskState);
+          if (!completer.isCompleted) {
+            completer.completeError(
+              activeTaskState.cancelReason ?? errorReason,
+            );
+          }
+        } else if (fromTimeout) {
+          _responseCompleters.remove(messageId);
+          _responseErrorHandlers.remove(messageId);
+          _cleanupProgressHandler(messageId);
+          _cleanupTaskAugmentedRequest(
+            activeTaskState,
+            cleanupProgress: false,
+          );
+          _cleanupTimeout(messageId);
+          if (!completer.isCompleted) {
+            completer
+                .completeError(activeTaskState.cancelReason ?? errorReason);
+          }
+        }
+        return;
+      }
+
       if (completer.isCompleted) return;
 
       _responseCompleters.remove(messageId);
       _responseErrorHandlers.remove(messageId);
-      _progressHandlers.remove(messageId);
+      _cleanupProgressHandler(messageId);
       _cleanupTimeout(messageId);
 
       final cancelReason = reason?.toString() ?? 'Request cancelled';
@@ -1007,14 +1503,18 @@ abstract class Protocol {
       // Spec doesn't strictly say, but usually cancellations go via same channel.
       // For now assume standard transport for cancellations unless queued.
 
-      _transport?.send(notification).catchError((e) {
+      _transport
+          ?.sendPreservingRequestId(
+        notification,
+        relatedRequestId: relatedRequestId,
+      )
+          .catchError((e) {
         _onerror(
           StateError("Failed to send cancellation for request $messageId: $e"),
         );
         return null;
       });
 
-      final errorReason = reason ?? AbortError("Request cancelled");
       completer.completeError(errorReason);
     }
 
@@ -1038,6 +1538,7 @@ abstract class Protocol {
           );
         },
       );
+      taskRequestState?.abortSubscription = abortSubscription;
     }
 
     final timeoutDuration = options?.timeout ?? defaultRequestTimeout;
@@ -1049,6 +1550,7 @@ abstract class Protocol {
           "Request $messageId timed out after $timeoutDuration",
           {'timeout': timeoutDuration.inMilliseconds},
         ),
+        fromTimeout: true,
       );
     }
 
@@ -1056,6 +1558,7 @@ abstract class Protocol {
       messageId,
       timeoutDuration,
       maxTotalTimeoutDuration,
+      options?.resetTimeoutOnProgress ?? false,
       timeoutHandler,
     );
 
@@ -1077,41 +1580,118 @@ abstract class Protocol {
         ),
         _transport?.sessionId,
       ).catchError((e) {
+        _requestResolvers.remove(messageId);
+        _responseCompleters.remove(messageId);
+        _responseErrorHandlers.remove(messageId);
         _cleanupTimeout(messageId);
+        _cleanupProgressHandler(messageId);
+        final state = taskRequestState;
+        if (state != null) {
+          _cleanupTaskAugmentedRequest(state, cleanupProgress: false);
+        }
         if (!completer.isCompleted) {
-          completer.completeError(e);
+          final cancellationReason = _preTaskIdCancellationReason(state);
+          completer.completeError(cancellationReason ?? e);
         }
       });
     } else {
       // Normal transport
       _transport!
-          .send(jsonrpcRequest, relatedRequestId: relatedRequestId)
+          .sendPreservingRequestId(
+        jsonrpcRequest,
+        relatedRequestId: relatedRequestId,
+      )
           .catchError((error) {
+        _responseCompleters.remove(messageId);
+        _responseErrorHandlers.remove(messageId);
         _cleanupTimeout(messageId);
+        _cleanupProgressHandler(messageId);
+        final state = taskRequestState;
+        if (state != null) {
+          _cleanupTaskAugmentedRequest(state, cleanupProgress: false);
+        }
         if (!completer.isCompleted) {
-          completer.completeError(error);
+          final cancellationReason = _preTaskIdCancellationReason(state);
+          completer.completeError(cancellationReason ?? error);
         }
         return null;
       });
     }
 
+    var preserveTaskLifecycle = false;
     return completer.future.then((response) {
+      Object? taskCancellationError;
+      late final T result;
       try {
-        return resultFactory(
+        result = resultFactory(
           response.toJson()['result'] as Map<String, dynamic>,
         );
+        final state = taskRequestState;
+        if (state != null) {
+          if (result is CreateTaskResult) {
+            final createdTask = result as CreateTaskResult;
+            final taskId = createdTask.task.taskId;
+            state.taskId = taskId;
+            final taskIsTerminal = createdTask.task.status.isTerminal ||
+                _earlyTerminalTaskIds.remove(taskId);
+
+            if (state.cancelRequested || options?.signal?.aborted == true) {
+              if (!state.cancelRequested && options?.signal?.aborted == true) {
+                state.cancelRequested = true;
+                state.cancelReason =
+                    options?.signal?.reason ?? AbortError("Request cancelled");
+              }
+              if (taskIsTerminal) {
+                _cleanupTaskAugmentedRequest(state);
+              } else {
+                _taskRequestsByTaskId[taskId] = state;
+                _clearEarlyTerminalTaskIdsIfUnneeded();
+                _sendTaskCancellation(state);
+                preserveTaskLifecycle = true;
+              }
+              taskCancellationError =
+                  state.cancelReason ?? AbortError("Request cancelled");
+            } else if (taskIsTerminal) {
+              _cleanupTaskAugmentedRequest(state);
+            } else {
+              _taskRequestsByTaskId[taskId] = state;
+              _clearEarlyTerminalTaskIdsIfUnneeded();
+              preserveTaskLifecycle = true;
+            }
+          } else {
+            _cleanupTaskAugmentedRequest(state);
+          }
+        }
       } catch (e, s) {
+        final state = taskRequestState;
+        final cancellationReason = _preTaskIdCancellationReason(state);
+        if (state != null) {
+          _cleanupTaskAugmentedRequest(state);
+        }
+        if (cancellationReason != null) {
+          throw cancellationReason;
+        }
         throw McpError(
           ErrorCode.internalError.value,
           "Failed to parse result for ${requestData.method}",
           "$e\n$s",
         );
       }
+      if (taskCancellationError != null) {
+        throw taskCancellationError;
+      }
+      return result;
     }).whenComplete(() {
-      abortSubscription?.cancel();
       _responseCompleters.remove(messageId);
       _responseErrorHandlers.remove(messageId);
-      _progressHandlers.remove(messageId);
+      if (!preserveTaskLifecycle) {
+        abortSubscription?.cancel();
+        _cleanupProgressHandler(messageId);
+        final state = taskRequestState;
+        if (state != null) {
+          _cleanupTaskAugmentedRequest(state, cleanupProgress: false);
+        }
+      }
     }).catchError((error) {
       throw capturedError ?? error;
     });
@@ -1122,6 +1702,18 @@ abstract class Protocol {
     JsonRpcNotification notificationData, {
     RelatedTaskMetadata? relatedTask,
     int? relatedRequestId,
+  }) {
+    return _notificationWithRequestId(
+      notificationData,
+      relatedTask: relatedTask,
+      relatedRequestId: relatedRequestId,
+    );
+  }
+
+  Future<void> _notificationWithRequestId(
+    JsonRpcNotification notificationData, {
+    RelatedTaskMetadata? relatedTask,
+    RequestId? relatedRequestId,
   }) async {
     if (_transport == null) {
       throw StateError("Not connected to a transport.");
@@ -1181,7 +1773,7 @@ abstract class Protocol {
         _pendingDebouncedNotifications.remove(notificationData.method);
         if (_transport == null) return;
         _transport!
-            .send(
+            .sendPreservingRequestId(
               jsonrpcNotification,
               relatedRequestId: relatedRequestId,
             )
@@ -1190,7 +1782,7 @@ abstract class Protocol {
       return;
     }
 
-    await _transport!.send(
+    await _transport!.sendPreservingRequestId(
       jsonrpcNotification,
       relatedRequestId: relatedRequestId,
     );
@@ -1524,6 +2116,17 @@ class _RequestTaskStoreImpl implements RequestTaskStore {
     TaskStatus status,
     BaseResultData result,
   ) async {
+    final currentTask = await _store.getTask(taskId, _sessionId);
+    if (currentTask == null) {
+      throw McpError(
+        ErrorCode.invalidParams.value,
+        'Failed to store task result: Task not found',
+      );
+    }
+    if (currentTask.status.isTerminal) {
+      return;
+    }
+
     await _store.storeTaskResult(taskId, status, result, _sessionId);
     final task = await _store.getTask(taskId, _sessionId);
     if (task != null) {

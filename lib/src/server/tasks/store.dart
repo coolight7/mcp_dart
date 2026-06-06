@@ -28,14 +28,13 @@ class InMemoryTaskStore implements TaskStore {
       for (final entry in _tasks.entries) {
         final task = entry.value;
         final ttl = task.ttl;
-        final createdAt = task.createdAt;
-        if (ttl == null || createdAt == null) {
+        if (ttl == null) {
           continue;
         }
 
         final DateTime created;
         try {
-          created = DateTime.parse(createdAt);
+          created = DateTime.parse(task.createdAt);
         } on FormatException {
           continue;
         }
@@ -138,19 +137,21 @@ class InMemoryTaskStore implements TaskStore {
     String? sessionId,
   ]) async {
     final task = _tasks[taskId];
-    if (task != null) {
-      _tasks[taskId] = Task(
-        taskId: task.taskId,
-        status: status,
-        statusMessage: message ?? task.statusMessage,
-        ttl: task.ttl,
-        pollInterval: task.pollInterval,
-        createdAt: task.createdAt,
-        lastUpdatedAt: DateTime.now().toIso8601String(),
-        meta: task.meta,
-      );
-      _notifyUpdate(taskId);
+    if (task == null || task.status.isTerminal) {
+      return;
     }
+
+    _tasks[taskId] = Task(
+      taskId: task.taskId,
+      status: status,
+      statusMessage: message ?? task.statusMessage,
+      ttl: task.ttl,
+      pollInterval: task.pollInterval,
+      createdAt: task.createdAt,
+      lastUpdatedAt: DateTime.now().toIso8601String(),
+      meta: task.meta,
+    );
+    _notifyUpdate(taskId);
   }
 
   @override
@@ -160,6 +161,11 @@ class InMemoryTaskStore implements TaskStore {
     BaseResultData result, [
     String? sessionId,
   ]) async {
+    final task = _tasks[taskId];
+    if (task == null || task.status.isTerminal) {
+      return;
+    }
+
     _results[taskId] = result;
     await updateTaskStatus(taskId, status, null, sessionId);
   }

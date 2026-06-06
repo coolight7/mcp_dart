@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:mcp_dart/src/server/server.dart';
 import 'package:mcp_dart/src/server/mcp_server.dart';
 import 'package:mcp_dart/src/shared/protocol.dart';
+import 'package:mcp_dart/src/shared/task_interfaces.dart';
 import 'package:mcp_dart/src/shared/transport.dart';
 import 'package:mcp_dart/src/types.dart';
 import 'package:test/test.dart';
@@ -35,6 +36,11 @@ class MockTransport extends Transport {
   /// Simulate receiving a message from the client
   void receiveMessage(JsonRpcMessage message) {
     onmessage?.call(message);
+    if (message is JsonRpcInitializeRequest) {
+      Future<void>.delayed(Duration.zero, () {
+        onmessage?.call(const JsonRpcInitializedNotification());
+      });
+    }
   }
 }
 
@@ -105,6 +111,118 @@ void main() {
 
       expect(callbackInvoked, isTrue);
       expect(receivedArgs['input'], equals('test value'));
+    });
+
+    test(
+        'ignores task metadata for normal tools when tool task capability is not advertised',
+        () async {
+      var callbackInvoked = false;
+
+      mcpServer.registerTool(
+        'normal_tool',
+        callback: (args, extra) async {
+          callbackInvoked = true;
+          expect(extra.taskRequestedTtl, isNull);
+          expect(extra.taskId, isNull);
+          expect(extra.meta?[relatedTaskMetadataKey], isNull);
+          expect(extra.meta?[legacyRelatedTaskMetadataKey], isNull);
+          expect(extra.meta?['progressToken'], 'keep-progress-token');
+          return const CallToolResult(
+            content: [TextContent(text: 'normal result')],
+          );
+        },
+      );
+
+      await mcpServer.connect(transport);
+
+      transport.receiveMessage(
+        JsonRpcInitializeRequest(
+          id: 1,
+          initParams: const InitializeRequestParams(
+            protocolVersion: latestProtocolVersion,
+            capabilities: ClientCapabilities(),
+            clientInfo: Implementation(name: 'TestClient', version: '1.0.0'),
+          ),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      transport.receiveMessage(
+        const JsonRpcCallToolRequest(
+          id: 2,
+          params: {
+            'name': 'normal_tool',
+            'arguments': {},
+            'task': {'ttl': 1000},
+            '_meta': {
+              relatedTaskMetadataKey: {'taskId': 'unsupported-task'},
+              legacyRelatedTaskMetadataKey: {'taskId': 'unsupported-task'},
+              'progressToken': 'keep-progress-token',
+            },
+          },
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      expect(callbackInvoked, isTrue);
+      final response = transport.sentMessages.last;
+      expect(response, isA<JsonRpcResponse>());
+      expect((response as JsonRpcResponse).result['content'], [
+        {'type': 'text', 'text': 'normal result'},
+      ]);
+    });
+
+    test(
+        'ignores related-task metadata without task key when task capability is not advertised',
+        () async {
+      RequestHandlerExtra? receivedExtra;
+
+      mcpServer.registerTool(
+        'related_only_tool',
+        callback: (args, extra) async {
+          receivedExtra = extra;
+          return const CallToolResult(
+            content: [TextContent(text: 'related only result')],
+          );
+        },
+      );
+
+      await mcpServer.connect(transport);
+
+      transport.receiveMessage(
+        JsonRpcInitializeRequest(
+          id: 1,
+          initParams: const InitializeRequestParams(
+            protocolVersion: latestProtocolVersion,
+            capabilities: ClientCapabilities(),
+            clientInfo: Implementation(name: 'TestClient', version: '1.0.0'),
+          ),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      transport.receiveMessage(
+        const JsonRpcCallToolRequest(
+          id: 2,
+          params: {
+            'name': 'related_only_tool',
+            'arguments': {},
+            '_meta': {
+              relatedTaskMetadataKey: {'taskId': 'unsupported-task'},
+              legacyRelatedTaskMetadataKey: {'taskId': 'unsupported-task'},
+              'progressToken': 'keep-progress-token',
+            },
+          },
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      expect(receivedExtra, isNotNull);
+      expect(receivedExtra!.taskRequestedTtl, isNull);
+      expect(receivedExtra!.taskId, isNull);
+      expect(receivedExtra!.meta?[relatedTaskMetadataKey], isNull);
+      expect(receivedExtra!.meta?[legacyRelatedTaskMetadataKey], isNull);
+      expect(receivedExtra!.meta?['progressToken'], 'keep-progress-token');
     });
 
     test('tool callback receives RequestHandlerExtra', () async {
@@ -904,7 +1022,204 @@ void main() {
       transport.receiveMessage(completeRequest);
       await Future.delayed(const Duration(milliseconds: 10));
 
-      expect(transport.sentMessages.isNotEmpty, isTrue);
+      final response = transport.sentMessages
+          .whereType<JsonRpcResponse>()
+          .where((r) => r.id == 2)
+          .first;
+      final completion = response.result['completion'] as Map<String, dynamic>;
+      expect(
+        completion['values'],
+        equals(['documents/file1.txt', 'documents/file2.txt']),
+      );
+    });
+
+    test('resource template completion receives context arguments', () async {
+      CompletionContext? receivedContext;
+
+      mcpServer.resourceTemplate(
+        'context_template',
+        ResourceTemplateRegistration(
+          'users://{organization}/{userId}',
+          listCallback: (extra) async =>
+              const ListResourcesResult(resources: []),
+          completeCallbacksWithContext: {
+            'userId': (currentValue, context) async {
+              receivedContext = context;
+              final organization = context?.arguments?['organization'];
+              return ['alice', 'alex', 'bob']
+                  .where((user) => user.startsWith(currentValue))
+                  .map((user) => '$organization/$user')
+                  .toList();
+            },
+          },
+        ),
+        (uri, variables, extra) async {
+          return ReadResourceResult(
+            contents: [
+              TextResourceContents(uri: uri.toString(), text: 'content'),
+            ],
+          );
+        },
+      );
+
+      await mcpServer.connect(transport);
+
+      final initRequest = JsonRpcInitializeRequest(
+        id: 1,
+        initParams: const InitializeRequestParams(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ClientCapabilities(),
+          clientInfo: Implementation(name: 'TestClient', version: '1.0.0'),
+        ),
+      );
+      transport.receiveMessage(initRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      final completeRequest = JsonRpcCompleteRequest(
+        id: 2,
+        completeParams: const CompleteRequestParams(
+          ref: ResourceReference(
+            uri: 'users://{organization}/{userId}',
+          ),
+          argument: ArgumentCompletionInfo(name: 'userId', value: 'al'),
+          context: CompletionContext(arguments: {'organization': 'eng'}),
+        ),
+      );
+      transport.receiveMessage(completeRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      expect(receivedContext?.arguments, equals({'organization': 'eng'}));
+
+      final response = transport.sentMessages
+          .whereType<JsonRpcResponse>()
+          .where((r) => r.id == 2)
+          .first;
+      final completion = response.result['completion'] as Map<String, dynamic>;
+      expect(completion['values'], equals(['eng/alice', 'eng/alex']));
+    });
+
+    test('resource template completion handles synchronous callback errors',
+        () async {
+      mcpServer.resourceTemplate(
+        'failing_template',
+        ResourceTemplateRegistration(
+          'failing://{path}',
+          listCallback: (extra) async =>
+              const ListResourcesResult(resources: []),
+          completeCallbacks: {
+            'path': (currentValue) {
+              throw StateError('completion exploded');
+            },
+          },
+        ),
+        (uri, variables, extra) async {
+          return ReadResourceResult(
+            contents: [
+              TextResourceContents(uri: uri.toString(), text: 'content'),
+            ],
+          );
+        },
+      );
+
+      await mcpServer.connect(transport);
+
+      final initRequest = JsonRpcInitializeRequest(
+        id: 1,
+        initParams: const InitializeRequestParams(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ClientCapabilities(),
+          clientInfo: Implementation(name: 'TestClient', version: '1.0.0'),
+        ),
+      );
+      transport.receiveMessage(initRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      final completeRequest = JsonRpcCompleteRequest(
+        id: 2,
+        completeParams: const CompleteRequestParams(
+          ref: ResourceReference(
+            uri: 'failing://{path}',
+          ),
+          argument: ArgumentCompletionInfo(name: 'path', value: 'docs'),
+        ),
+      );
+      transport.receiveMessage(completeRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      final error = transport.sentMessages
+          .whereType<JsonRpcError>()
+          .where((r) => r.id == 2)
+          .first;
+      expect(error.error.code, equals(ErrorCode.internalError.value));
+      expect(error.error.message, equals('Completion failed'));
+    });
+
+    test('prompt completion receives context arguments', () async {
+      CompletionContext? receivedContext;
+
+      mcpServer.prompt(
+        'context_prompt',
+        argsSchema: {
+          'city': PromptArgumentDefinition(
+            completable: CompletableField(
+              def: CompletableDef(
+                complete: (value) async => [],
+                completeWithContext: (value, context) async {
+                  receivedContext = context;
+                  final country = context?.arguments?['country'];
+                  return ['$country/$value'];
+                },
+              ),
+            ),
+          ),
+        },
+        callback: (args, extra) async {
+          return const GetPromptResult(
+            messages: [
+              PromptMessage(
+                role: PromptMessageRole.user,
+                content: TextContent(text: 'ok'),
+              ),
+            ],
+          );
+        },
+      );
+
+      await mcpServer.connect(transport);
+
+      final initRequest = JsonRpcInitializeRequest(
+        id: 1,
+        initParams: const InitializeRequestParams(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ClientCapabilities(),
+          clientInfo: Implementation(name: 'TestClient', version: '1.0.0'),
+        ),
+      );
+      transport.receiveMessage(initRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      final completeRequest = JsonRpcCompleteRequest(
+        id: 2,
+        completeParams: const CompleteRequestParams(
+          ref: PromptReference(
+            name: 'context_prompt',
+            title: 'Context Prompt',
+          ),
+          argument: ArgumentCompletionInfo(name: 'city', value: 'Seoul'),
+          context: CompletionContext(arguments: {'country': 'KR'}),
+        ),
+      );
+      transport.receiveMessage(completeRequest);
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      expect(receivedContext?.arguments, equals({'country': 'KR'}));
+
+      final response = transport.sentMessages
+          .whereType<JsonRpcResponse>()
+          .where((r) => r.id == 2)
+          .first;
+      final completion = response.result['completion'] as Map<String, dynamic>;
+      expect(completion['values'], equals(['KR/Seoul']));
     });
 
     test('completion limits results to 100 items', () async {

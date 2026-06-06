@@ -1,4 +1,240 @@
-## Unreleased
+## 2.2.0
+
+### Documentation
+
+- Added interoperability, Flutter recipe, and migration cookbook guides, and expanded MCP Apps example guidance with host compatibility notes.
+- Added an MCP 2025-11-25 spec coverage matrix that maps high-risk
+  requirements to unit tests, TypeScript interop tests, CLI conformance cases,
+  and known follow-up gaps.
+- Added deployment-oriented security coverage for Streamable HTTP Host/Origin
+  allowlists, auth gating, compatibility-toggle trade-offs, and OAuth PKCE S256
+  example flow, including TypeScript SDK OAuth interop coverage.
+- Documented first-class OAuth protected-resource metadata and bearer challenge
+  support for `StreamableMcpServer`.
+- Refreshed example documentation for current stdio, weather, Streamable HTTP,
+  Flutter, Jaspr, and MCP Apps flows, including non-credentialed smoke commands.
+- Refreshed additional guide snippets for request timeouts, task capability
+  pre-advertisement, progress reporting, local documentation links, and
+  documented `dart run` targets.
+- Improved pub.dev discoverability metadata with a clearer package
+  description, documentation link, topics, platform declarations, and package
+  page summary copy.
+
+### Spec Alignment
+
+- Preserved the MCP `Result._meta` field across typed result serializers,
+  including initialization, roots, resources, prompts, completion, elicitation,
+  tools, tasks, sampling, and empty results.
+- Aligned stable completions support with MCP 2025-11-25 by advertising
+  `{"completions": {}}` and moving the old completion list-changed helper to an
+  explicit experimental notification namespace.
+- Aligned URL-mode elicitation responses with MCP 2025-11-25: URL accept
+  results now serialize only the user `action`, while completion still uses
+  `notifications/elicitation/complete`. `ElicitResult.fromJson()` now rejects
+  actions outside `accept`, `decline`, and `cancel`.
+- Changed titled `JsonEnum` output to JSON Schema 2020-12-native `oneOf` or
+  array-item `anyOf` const/title entries while continuing to parse legacy
+  `enumNames` payloads.
+- Added first-class MCP OAuth client discovery for
+  `StreamableHttpClientTransport` through optional
+  `OAuthAuthorizationCodeProvider` support: bearer challenge parsing,
+  protected-resource metadata discovery, authorization-server/OIDC metadata
+  discovery, PKCE S256 authorization URLs with `resource`, and token exchange
+  with `code_verifier` and `resource`.
+- Added `OAuthAuthorizationCodeTokens` for token response metadata returned by
+  the authorization-code exchange path without changing the base `OAuthTokens`
+  API shape used by existing providers and subclasses.
+- Added `StreamableMcpAuthenticationResult` for high-level Streamable HTTP
+  servers that need to distinguish allow, unauthorized, and OAuth
+  `insufficient_scope` 403 responses while preserving the existing bool
+  `authenticator` path.
+- Tightened MCP/JSON-RPC boundary validation for request IDs, progress tokens,
+  cancellation request IDs, and sampling tool-use capability gating so malformed
+  wire values and unsupported `sampling.tools` requests fail before handler code
+  runs.
+- Added optional `StreamableMcpServer` OAuth protected-resource support that
+  serves OAuth Protected Resource Metadata and returns spec-shaped
+  `WWW-Authenticate: Bearer ... resource_metadata=...` challenges for failed
+  authentication, including an explicit public metadata URL for reverse-proxy
+  deployments, while preserving legacy generic-auth `403` behavior when the
+  option is not configured.
+- Enforced MCP task related-metadata and progress rules by overwriting
+  reserved related-task metadata from the SDK's source task id, preserving
+  unrelated handler metadata, and rejecting repeated/decreasing progress values
+  before sending invalid progress notifications.
+- Added MCP `completion/complete` wire support for
+  `context.arguments` and `PromptReference.title`, including context-aware
+  server completion callbacks for prompt and resource-template completions.
+- Enforced explicit task-augmented request negotiation via `tasks.requests.*`:
+  task-based tool calls require `tasks.requests.tools.call`, server-initiated
+  task sampling requires `tasks.requests.sampling.createMessage`, and
+  server-initiated task elicitation requires `tasks.requests.elicitation.create`.
+- Enforced MCP lifecycle ordering for incoming protocol messages: servers now
+  reject operation requests before `initialize` and before
+  `notifications/initialized`, and clients now reject server-initiated operation
+  requests before sending `notifications/initialized`.
+- Validated `elicitation/create` parameters as the MCP 2025-11-25 form/URL
+  union, including URL-only client handler registration and unsupported
+  elicitation-mode rejection.
+- Added MCP 2025-11-25 stable metadata coverage for `Resource.size`,
+  `Root._meta`, stable `icons`, resource annotations, and tool annotations.
+  Legacy singular `icon` fields and non-stable annotation helper fields remain
+  parse-compatible but are no longer emitted on stable schema objects.
+- Enforced stable `Tool.inputSchema` and `Tool.outputSchema` root-object shapes
+  at parse and serialization boundaries while preserving the existing
+  `JsonSchema`-typed public fields for source compatibility.
+- Aligned JSON-RPC response ID handling with the MCP schema: result responses
+  require a string or integer `id`, error responses may omit `id`, and malformed
+  response IDs fail during parsing.
+- Stopped serializing non-stable server capability fields such as top-level
+  `elicitation` and `tasks.listChanged`; legacy payloads still parse for
+  compatibility.
+- Tightened MCP form elicitation validation to require object-root
+  `requestedSchema` values with primitive property schemas, restricted
+  `ElicitResult.content` to spec-supported primitive values, and validated
+  URL-required error data.
+- Kept task `_meta` only where MCP permits result or notification metadata:
+  bare nested `Task` values in task lists and task creation results no longer
+  serialize `_meta`.
+- Refused OAuth authorization-code discovery when the authorization server
+  metadata omits `code_challenge_methods_supported` or does not advertise
+  `S256`.
+- Added Streamable HTTP resumability priming events so server-initiated SSE
+  streams with an `EventStore` begin with an event `id` and empty `data` frame,
+  matching the MCP `Last-Event-ID` reconnection guidance.
+
+### Compatibility Notes (Potentially Breaking)
+
+- **MCP 2025-11-25 wire validation is stricter**:
+  - Stable metadata serializers no longer emit legacy singular `icon` fields,
+    `ResourceAnnotations.title`, `ToolAnnotations.priority`, or
+    `ToolAnnotations.audience`; those fields still parse into deprecated Dart
+    accessors for one compatibility window.
+  - Missing required result arrays such as `resources`, `resourceTemplates`,
+    `contents`, `prompts`, `tools`, `roots`, and `tasks` now fail during
+    parsing. Empty arrays remain valid when the required key is present.
+  - `Tool.inputSchema`, `Tool.outputSchema`, and form elicitation
+    `requestedSchema` values must serialize as root JSON objects. Primitive
+    root schemas are rejected at the MCP wire boundary.
+  - Successful JSON-RPC responses with `id: null` are rejected. Error responses
+    may omit `id`; legacy `id: null` error payloads still parse, but serialize
+    by omitting the field.
+  - OAuth authorization-code discovery now requires advertised PKCE `S256`
+    support; clients refuse servers that omit
+    `code_challenge_methods_supported`.
+- **Stable completion list-changed wire behavior is removed**:
+  - `ServerCapabilitiesCompletions(listChanged: true)` remains source-compatible
+    and still parses legacy payloads, but serializes as the stable MCP
+    `completions: {}` capability.
+  - `sendCompletionListChanged()` is deprecated and emits
+    `notifications/experimental/completions/list_changed` instead of the
+    non-spec stable method.
+- **URL-mode elicitation result echoes are no longer emitted**:
+  - Deprecated `ElicitResult.url` and `ElicitResult.elicitationId` fields remain
+    parse-compatible for legacy payloads, but `toJson()` omits them.
+  - Invalid `ElicitResult.action` values now fail during parsing.
+- **Lifecycle and elicitation validation are stricter**:
+  - Peers that send operation requests before initialization completes now
+    receive `invalidRequest` errors instead of reaching request handlers.
+  - Invalid form/URL `elicitation/create` parameter combinations now fail during
+    parsing or serialization.
+  - No public API signatures were removed or renamed; this is a behavioral
+    wire-protocol compatibility change.
+- **Task cancellation now returns the final task state**:
+  - `tasks/cancel` responses now serialize the cancelled `Task` required by MCP
+    2025-11-25 instead of an empty result object.
+  - New spec-compliant APIs expose that result explicitly:
+    `onCancelTaskWithResult`, `CancelTaskCallback`,
+    `CancelTaskResultHandler.cancelTaskWithResult`, and
+    `TaskClient.cancelTaskWithResult` return the cancelled `Task`.
+  - Legacy APIs remain source-compatible for one compatibility window:
+    `onCancelTask`, `ToolTaskHandler.cancelTask`, and `TaskClient.cancelTask`
+    are deprecated shims. The server-side legacy shims still return a full
+    cancelled `Task` on the wire by resolving the post-cancel task through
+    `onGetTask`/`getTask`.
+  - `TaskClient.cancelTaskWithResult` expects a task-shaped result and will
+    reject older non-compliant servers that still return `{}`. Deprecated
+    `TaskClient.cancelTask` remains available when callers intentionally need
+    the legacy empty-result behavior.
+  - `Task.fromJson()` requires MCP-required task fields (`createdAt`,
+    `lastUpdatedAt`, and `ttl`), and the `Task` constructor now requires
+    `ttl`, `createdAt`, and `lastUpdatedAt` so serialization is non-throwing
+    for valid task instances.
+  - `TaskStatusNotification.fromJson()` likewise requires the full MCP
+    `NotificationParams & Task` shape (`taskId`, `status`, `ttl`, `createdAt`,
+    and `lastUpdatedAt`), and task status notifications always serialize the
+    required `ttl` key even when it is `null`.
+  - `Task.toJson()` continues to serialize required `ttl` even when it is
+    `null`, and now omits optional `pollInterval` when it is not set.
+  - Task stores now treat terminal tasks (`completed`, `failed`, `cancelled`) as
+    immutable, preventing later status or result overwrites.
+- **Streamable HTTP session/replay semantics are stricter**:
+  - Custom `sessionIdGenerator` output must now be non-empty visible ASCII
+    without spaces or control characters; invalid generated IDs fail
+    initialization before an `MCP-Session-Id` header is written.
+  - Concurrent standalone GET SSE streams no longer receive broadcast copies of
+    each server-originated message. Messages are routed to one active stream so
+    resumability can preserve the MCP stream ownership boundary.
+  - Custom `EventStore` implementations must return non-empty visible-ASCII SSE
+    event IDs without spaces or control characters, scope `Last-Event-ID`
+    replay to the owning live transport/session stream, and reject unknown or
+    foreign event IDs instead of replaying unrelated stream history.
+
+### Compatibility Notes
+
+- **Custom transports remain source-compatible while string request routing is available**:
+  - `Transport.send(... relatedRequestId: ...)` keeps the existing `int?`
+    signature for third-party custom transports and middleware.
+  - Transports that route by JSON-RPC request ID can opt into
+    `RequestIdAwareTransport.sendWithRequestId(... relatedRequestId: ...)` to
+    receive the full MCP/JSON-RPC request ID shape (`String` or `int`).
+  - Middleware wrappers that implement `RequestIdAwareTransport` should forward
+    through `sendPreservingRequestId(...)` so string IDs are not dropped.
+
+### Reliability
+
+- Scoped Streamable HTTP SSE resumability to the stream identified by
+  `Last-Event-ID`, allowing multiple concurrent GET SSE streams per session
+  without replaying events from unrelated streams.
+- Routed each server-originated standalone GET SSE message to one active stream
+  instead of broadcasting the same JSON-RPC message across concurrent streams,
+  and retried another active stream when the selected target was stale.
+- Returned `404 Session not found` for stale, unknown, or terminated Streamable
+  HTTP session IDs across high-level and bare transports, retried client
+  initialization once without a stale preconfigured session ID, refreshed stale
+  sessions with single-flight reinitialization before retrying post-initialize
+  requests, and stopped old SSE reconnect loops after a session reset.
+- Honored `RequestOptions.resetTimeoutOnProgress` and `maxTotalTimeout` together
+  so progress notifications can reset inactivity timers without bypassing the
+  absolute total timeout cap.
+- Supported string progress tokens end-to-end for outgoing requests that supply
+  a custom `progressToken`, while preserving generated integer tokens for the
+  default `RequestOptions.onprogress` path.
+- Preserved string JSON-RPC request IDs when handler code sends nested requests,
+  notifications, or cancellation notifications, keeping related-request routing
+  compatible with clients that use string IDs.
+- Improved JSON Schema parsing and validation for `const`, enum-only schemas,
+  titled enum `const` entries, and simple `type` array unions such as nullable
+  schemas.
+- Fixed browser example interoperability by allowing the MCP protocol-version
+  header in CORS preflight responses, mapping Flutter prompt input to advertised
+  prompt arguments, and using typed DOM inputs in the Jaspr client.
+
+### Tooling
+
+- Added `mcp_dart conformance` with built-in JSON-RPC and protocol-version fixture checks, deterministic JSON-RPC fuzz cases, exact-case filtering, and JSON output for CI/scripts.
+- Added a `mcp_dart conformance --suite spec` gate for MCP 2025-11-25
+  lifecycle, capability, elicitation, task-metadata, and progress-token
+  raw-wire checks.
+- CI now runs `mcp_dart conformance --suite all --json` so JSON-RPC and
+  protocol-version fixtures are checked with the spec suite.
+- Added local non-credentialed example smoke tests for stdio, iostream,
+  required-field schema preservation, CLI inspect, completions, and MCP Apps
+  metadata examples.
+- Added Markdown documentation guards for broken local links and documented
+  `dart run` targets.
+
+## 2.1.1
 
 ### Compatibility Notes (Potentially Breaking)
 
@@ -12,6 +248,12 @@
 - Fixed `JsonEnum` tool/input schema serialization to use standard JSON Schema enum output,
   improving compatibility with downstream consumers that reject the legacy
   `type: 'enum'` / `values` shape.
+- Serialized concurrent stdio transport writes so overlapping requests no longer
+  trip Dart `IOSink` write/flush errors.
+
+### Documentation
+
+- Updated installation snippets and schema/stdio transport guidance for the 2.1.1 release.
 
 ## 2.1.0
 

@@ -8,7 +8,8 @@ import 'package:test/test.dart';
 
 /// Mock stdin stream for testing
 class MockStdin extends Stream<List<int>> implements io.Stdin {
-  final StreamController<List<int>> _controller = StreamController<List<int>>();
+  final StreamController<List<int>> _controller =
+      StreamController<List<int>>.broadcast();
 
   @override
   StreamSubscription<List<int>> listen(
@@ -84,6 +85,9 @@ class MockStdin extends Stream<List<int>> implements io.Stdin {
 class MockStdout implements io.IOSink {
   final List<String> writtenData = [];
   bool _closed = false;
+  Object? flushError;
+  Completer<void>? flushBlocker;
+  Completer<void>? flushStarted;
 
   @override
   void write(Object? object) {
@@ -99,7 +103,24 @@ class MockStdout implements io.IOSink {
   }
 
   @override
-  Future<void> flush() async {}
+  Future<void> flush() async {
+    final started = flushStarted;
+    if (started != null && !started.isCompleted) {
+      started.complete();
+    }
+
+    final error = flushError;
+    if (error != null) {
+      flushError = null;
+      throw error;
+    }
+
+    final blocker = flushBlocker;
+    if (blocker != null) {
+      flushBlocker = null;
+      await blocker.future;
+    }
+  }
 
   @override
   void writeAll(Iterable objects, [String separator = '']) {
@@ -312,6 +333,158 @@ void main() {
       expect(receivedError, isNotNull);
     });
 
+    test('rejects malformed MCP wire values from raw stdio input', () async {
+      final vectors = <({String field, Map<String, dynamic> message})>[
+        (
+          field: 'id',
+          message: {
+            'jsonrpc': '2.0',
+            'id': false,
+            'method': 'ping',
+          },
+        ),
+        (
+          field: 'id',
+          message: {
+            'jsonrpc': '2.0',
+            'id': null,
+            'method': 'ping',
+          },
+        ),
+        (
+          field: 'progressToken',
+          message: {
+            'jsonrpc': '2.0',
+            'id': 'with-bad-meta',
+            'method': 'ping',
+            'params': {
+              '_meta': {
+                'progressToken': <String, dynamic>{},
+              },
+            },
+          },
+        ),
+        (
+          field: '_meta',
+          message: {
+            'jsonrpc': '2.0',
+            'id': 'with-bad-meta-shape',
+            'method': 'ping',
+            'params': {
+              '_meta': false,
+            },
+          },
+        ),
+        (
+          field: 'progressToken',
+          message: {
+            'jsonrpc': '2.0',
+            'method': 'notifications/progress',
+            'params': {
+              'progressToken': <Object>[],
+              'progress': 0,
+            },
+          },
+        ),
+        (
+          field: 'requestId',
+          message: {
+            'jsonrpc': '2.0',
+            'method': 'notifications/cancelled',
+            'params': {
+              'requestId': true,
+            },
+          },
+        ),
+        (
+          field: 'id',
+          message: {
+            'jsonrpc': '2.0',
+            'id': false,
+            'result': <String, dynamic>{},
+          },
+        ),
+        (
+          field: 'id',
+          message: {
+            'jsonrpc': '2.0',
+            'id': <Object>[],
+            'error': {
+              'code': -32600,
+              'message': 'Invalid request',
+            },
+          },
+        ),
+      ];
+
+      for (final vector in vectors) {
+        final localStdin = MockStdin();
+        final localStdout = MockStdout();
+        final localTransport = StdioServerTransport(
+          stdin: localStdin,
+          stdout: localStdout,
+        );
+        final receivedMessages = <JsonRpcMessage>[];
+        final receivedErrors = <Error>[];
+        localTransport
+          ..onmessage = receivedMessages.add
+          ..onerror = receivedErrors.add;
+
+        await localTransport.start();
+        localStdin.addString('${jsonEncode(vector.message)}\n');
+        await Future.delayed(const Duration(milliseconds: 50));
+        await localTransport.close();
+
+        expect(
+          receivedMessages,
+          isEmpty,
+          reason: 'Malformed ${vector.field} should not reach handlers',
+        );
+        expect(receivedErrors, hasLength(1));
+        expect(receivedErrors.single.toString(), contains(vector.field));
+      }
+    });
+
+    test('preserves valid MCP wire IDs and tokens from raw stdio input',
+        () async {
+      final receivedMessages = <JsonRpcMessage>[];
+      transport.onmessage = receivedMessages.add;
+
+      await transport.start();
+
+      stdin.addString(
+        '${jsonEncode({
+              'jsonrpc': '2.0',
+              'id': 'request-1',
+              'method': 'ping',
+              'params': {
+                '_meta': {'progressToken': 'progress-1'},
+              },
+            })}\n',
+      );
+      stdin.addString(
+        '${jsonEncode({
+              'jsonrpc': '2.0',
+              'id': 2,
+              'method': 'ping',
+              'params': {
+                '_meta': {'progressToken': 3},
+              },
+            })}\n',
+      );
+
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(receivedMessages, hasLength(2));
+      expect((receivedMessages[0] as JsonRpcPingRequest).id, 'request-1');
+      expect(
+        (receivedMessages[0] as JsonRpcPingRequest).progressToken,
+        'progress-1',
+      );
+      expect((receivedMessages[1] as JsonRpcPingRequest).id, 2);
+      expect((receivedMessages[1] as JsonRpcPingRequest).progressToken, 3);
+    });
+
     test('calls onclose when stdin closes', () async {
       var oncloseCalled = false;
       transport.onclose = () {
@@ -397,6 +570,43 @@ void main() {
 
       // No data written because not started
       expect(stdout.writtenData.length, equals(0));
+    });
+
+    test('continues queued sends after a failed write', () async {
+      await transport.start();
+      stdout.flushError = StateError('Flush failed');
+
+      final firstSend = expectLater(
+        transport.send(const JsonRpcPingRequest(id: 1)),
+        throwsA(isA<StateError>()),
+      );
+      final secondSend = transport.send(const JsonRpcPingRequest(id: 2));
+
+      await firstSend;
+      await secondSend;
+
+      expect(stdout.writtenData.length, equals(2));
+    });
+
+    test('does not write queued sends after restart', () async {
+      await transport.start();
+      stdout.flushStarted = Completer<void>();
+      final flushBlocker = Completer<void>();
+      stdout.flushBlocker = flushBlocker;
+
+      final firstSend = transport.send(const JsonRpcPingRequest(id: 1));
+      await stdout.flushStarted!.future;
+
+      final secondSend = transport.send(const JsonRpcPingRequest(id: 2));
+      await transport.close();
+      await transport.start();
+
+      flushBlocker.complete();
+      await firstSend;
+      await secondSend;
+
+      expect(stdout.writtenData.length, equals(1));
+      expect(stdout.writtenData.single, contains('"id":1'));
     });
   });
 

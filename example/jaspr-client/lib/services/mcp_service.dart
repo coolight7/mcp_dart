@@ -254,10 +254,18 @@ class McpService {
           };
           _emitLog(level, params.data.toString());
         },
-        (params, meta) => JsonRpcLoggingMessageNotification(
-          logParams: LoggingMessageNotification.fromJson(params ?? {}),
-          meta: meta,
-        ),
+        (params, meta) {
+          if (params == null) {
+            throw const FormatException(
+              'Missing params for logging message notification',
+            );
+          }
+
+          return JsonRpcLoggingMessageNotification(
+            logParams: LoggingMessageNotification.fromJson(params),
+            meta: meta,
+          );
+        },
       );
 
       // Create the transport
@@ -467,8 +475,8 @@ class McpService {
   Future<void> cancelTask(String taskId) async {
     _ensureConnected();
     try {
-      await _taskClient!.cancelTask(taskId);
-      _emitLog(McpLogLevel.info, 'Cancelled task: $taskId');
+      final task = await _taskClient!.cancelTaskWithResult(taskId);
+      _emitLog(McpLogLevel.info, 'Cancelled task: ${task.taskId}');
     } catch (e) {
       _emitLog(McpLogLevel.error, 'Failed to cancel task: $e');
       rethrow;

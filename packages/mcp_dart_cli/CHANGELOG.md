@@ -1,3 +1,49 @@
+## 0.1.9
+
+- Add `mcp_dart inspect-server` for structured MCP server inspection reports
+  covering handshake, capabilities, ping, tools, resources, resource templates,
+  prompts, completions, logging, task-capable tool calls, notifications,
+  Streamable HTTP session handling, and OAuth protected-resource metadata
+  discovery, with optional JSON probe configs for app-specific tool, resource,
+  prompt, completion, and task arguments.
+- Add `mcp_dart inspect-client` as a stdio MCP harness for inspecting client
+  initialization, advertised capabilities, primitive discovery/call behavior,
+  and active roots/sampling/elicitation request handling.
+- Add `mcp_dart trace` as a stdio proxy that forwards client/server traffic and
+  writes a JSON trace report with raw frames, parsed messages, ids, methods,
+  timings, server stderr, and malformed-frame errors.
+- Add `mcp_dart list-tools` and `mcp_dart call-tool` as scriptable MCP
+  debugging commands for Dart, TypeScript, Python, and other spec-compatible
+  servers.
+- Add `mcp_dart skills install/print` with a bundled MCP developer agent skill.
+- Add CLI e2e interop coverage against official TypeScript/Python MCP SDK
+  servers and clients, Streamable HTTP, and published TypeScript filesystem and
+  Python time MCP servers.
+- Clarify that `inspect-server` and `inspect-client` are the live inspection
+  workflow, while `conformance` is a built-in SDK/CLI regression fixture suite.
+- Add standalone GitHub release binary build automation and one-line installer
+  scripts for users without the Dart SDK.
+- Extend `mcp_dart update` to upgrade standalone GitHub release binaries.
+
+## 0.1.8
+
+- Make `mcp_dart inspect` capability listing respect the server's advertised
+  capabilities instead of probing unsupported list methods.
+- Improve pub.dev metadata with a clearer description, documentation and issue
+  links, topics, platform declarations, and package page summary copy.
+- Update the CLI dependency constraint to `mcp_dart ^2.2.0`.
+- Add `mcp_dart conformance` with built-in JSON-RPC and protocol-version fixture checks, deterministic JSON-RPC fuzz cases, exact-case filtering, and JSON output for CI/scripts.
+- Add `mcp_dart conformance --suite spec` for MCP 2025-11-25 lifecycle,
+  capability, elicitation, task-metadata, and progress-token raw-wire checks.
+- Document `mcp_dart conformance --suite all` as the stable non-fuzz coverage
+  gate used by CI.
+
+## 0.1.7
+
+- Fix `mcp_dart inspect` for local projects whose `pubspec.yaml` package name is quoted.
+- Parse local project package names with the YAML parser shared by `inspect` and `serve`.
+- Update the CLI and simple template dependency constraint to `mcp_dart ^2.1.1`.
+
 ## 0.1.6
 
 - Update to mcp_dart 1.2.0

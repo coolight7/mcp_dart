@@ -22,7 +22,10 @@ sealed class Reference {
         'type': type,
         ...switch (this) {
           final ResourceReference r => {'uri': r.uri},
-          final PromptReference p => {'name': p.name},
+          final PromptReference p => {
+              'name': p.name,
+              if (p.title != null) 'title': p.title,
+            },
         },
       };
 }
@@ -44,11 +47,18 @@ class ResourceReference extends Reference {
 class PromptReference extends Reference {
   final String name;
 
-  const PromptReference({required this.name}) : super(type: 'ref/prompt');
+  /// A human-readable title of the prompt.
+  final String? title;
+
+  const PromptReference({
+    required this.name,
+    this.title,
+  }) : super(type: 'ref/prompt');
 
   factory PromptReference.fromJson(Map<String, dynamic> json) {
     return PromptReference(
       name: json['name'] as String,
+      title: json['title'] as String?,
     );
   }
 }
@@ -79,6 +89,26 @@ class ArgumentCompletionInfo {
       };
 }
 
+/// Additional context for completion requests.
+class CompletionContext {
+  /// Previously-resolved variables in a URI template or prompt.
+  final Map<String, String>? arguments;
+
+  const CompletionContext({this.arguments});
+
+  factory CompletionContext.fromJson(Map<String, dynamic> json) {
+    return CompletionContext(
+      arguments: (json['arguments'] as Map<String, dynamic>?)?.map(
+        (key, value) => MapEntry(key, value as String),
+      ),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        if (arguments != null) 'arguments': arguments,
+      };
+}
+
 /// Parameters for the `completion/complete` request.
 class CompleteRequest {
   /// The reference identifying the completion target (prompt or resource).
@@ -87,7 +117,14 @@ class CompleteRequest {
   /// Information about the argument being completed.
   final ArgumentCompletionInfo argument;
 
-  const CompleteRequest({required this.ref, required this.argument});
+  /// Additional context for resolving completions.
+  final CompletionContext? context;
+
+  const CompleteRequest({
+    required this.ref,
+    required this.argument,
+    this.context,
+  });
 
   factory CompleteRequest.fromJson(Map<String, dynamic> json) =>
       CompleteRequest(
@@ -95,11 +132,17 @@ class CompleteRequest {
         argument: ArgumentCompletionInfo.fromJson(
           json['argument'] as Map<String, dynamic>,
         ),
+        context: json['context'] == null
+            ? null
+            : CompletionContext.fromJson(
+                json['context'] as Map<String, dynamic>,
+              ),
       );
 
   Map<String, dynamic> toJson() => {
         'ref': ref.toJson(),
         'argument': argument.toJson(),
+        if (context != null) 'context': context!.toJson(),
       };
 }
 
@@ -122,9 +165,9 @@ class JsonRpcCompleteRequest extends JsonRpcRequest {
     if (paramsMap == null) {
       throw const FormatException("Missing params for complete request");
     }
-    final meta = paramsMap['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcCompleteRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       completeParams: CompleteRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -149,18 +192,36 @@ class CompletionResultData {
   }) : assert(values.length <= 100);
 
   factory CompletionResultData.fromJson(Map<String, dynamic> json) {
+    final values = json['values'];
+    if (values is! List) {
+      throw const FormatException('CompletionResultData.values is required');
+    }
+    if (values.length > 100) {
+      throw const FormatException(
+        'CompletionResultData.values must not exceed 100 items',
+      );
+    }
     return CompletionResultData(
-      values: (json['values'] as List<dynamic>?)?.cast<String>() ?? [],
+      values: values.cast<String>(),
       total: json['total'] as int?,
       hasMore: json['hasMore'] as bool?,
     );
   }
 
-  Map<String, dynamic> toJson() => {
-        'values': values,
-        if (total != null) 'total': total,
-        if (hasMore != null) 'hasMore': hasMore,
-      };
+  Map<String, dynamic> toJson() {
+    if (values.length > 100) {
+      throw ArgumentError.value(
+        values.length,
+        'values.length',
+        'CompletionResultData.values must not exceed 100 items',
+      );
+    }
+    return {
+      'values': values,
+      if (total != null) 'total': total,
+      if (hasMore != null) 'hasMore': hasMore,
+    };
+  }
 }
 
 /// Result data for a successful `completion/complete` request.
@@ -185,13 +246,22 @@ class CompleteResult implements BaseResultData {
   }
 
   @override
-  Map<String, dynamic> toJson() => {'completion': completion.toJson()};
+  Map<String, dynamic> toJson() => {
+        'completion': completion.toJson(),
+        if (meta != null) '_meta': meta,
+      };
 }
 
-/// Notification from server indicating the list of available completions has changed.
+/// Experimental notification indicating available completions have changed.
+///
+/// Stable MCP 2025-11-25 does not define a completion list changed
+/// notification. This class emits an explicit experimental method namespace.
+@Deprecated(
+  'Stable MCP 2025-11-25 does not define completion list-changed notifications.',
+)
 class JsonRpcCompletionListChangedNotification extends JsonRpcNotification {
   const JsonRpcCompletionListChangedNotification()
-      : super(method: Method.notificationsCompletionsListChanged);
+      : super(method: Method.notificationsExperimentalCompletionsListChanged);
 
   factory JsonRpcCompletionListChangedNotification.fromJson(
     Map<String, dynamic> json,

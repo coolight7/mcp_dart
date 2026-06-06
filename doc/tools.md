@@ -12,7 +12,7 @@ Tools are functions that AI can call to perform actions. They are the primary wa
 server.registerTool(
   'tool-name',
   description: 'What the tool does',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'param': JsonSchema.string(),
     },
@@ -27,6 +27,14 @@ server.registerTool(
 ```
 
 ## JSON Schema Validation
+
+mcp_dart implements a pragmatic JSON Schema subset for MCP tool input/output and elicitation schemas; it is not a complete JSON Schema 2020-12 validator.
+
+MCP 2025-11-25 requires both `inputSchema` and `outputSchema` on a `Tool` to be
+object-root JSON Schema values. Use `JsonSchema.object(...)` or
+`JsonObject.fromJson(...)` at the root and put primitive values under named
+properties. Primitive root schemas such as `JsonSchema.string()` are rejected at
+the MCP wire boundary for tools and form elicitation.
 
 ### Basic Types
 
@@ -73,7 +81,7 @@ server.registerTool(
 ```dart
 server.registerTool(
   'create-user',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'username': JsonSchema.string(
         minLength: 3,
@@ -111,6 +119,41 @@ server.registerTool(
 );
 ```
 
+### Enum Wire Format
+
+String enum schemas serialize as standard JSON Schema:
+
+```json
+{
+  "type": "string",
+  "enum": ["user", "admin", "moderator"]
+}
+```
+
+`JsonEnum` uses the same standard output. When enum values include display titles, it emits JSON Schema `oneOf` entries with `const` and `title`; when a titled enum is used as array items, it emits `anyOf` entries. Mixed primitive enums without titles emit an `enum` array without a `type`. Legacy serialized input using `type: 'enum'` / `values` or `enumNames` is still accepted by parsers.
+
+### Const Values
+
+Use `JsonSchema.constValue(...)` when a property must equal exactly one JSON value:
+
+```dart
+'confirmation': JsonSchema.constValue('DELETE')
+```
+
+This emits standard JSON Schema `const` and validates only the constant value.
+
+### Nullable and Type Unions
+
+`JsonSchema.fromJson(...)` also accepts simple JSON Schema `type` arrays, such as nullable string schemas:
+
+```json
+{
+  "type": ["string", "null"]
+}
+```
+
+These are parsed as a union of the listed primitive schema types and validate only values matching one of those types.
+
 ## Tool Annotations
 
 Provide behavioral hints to clients:
@@ -121,8 +164,8 @@ Provide behavioral hints to clients:
 server.registerTool(
   'get-user-stats',
   description: 'Get user statistics',
-  annotations: ToolAnnotations(readOnly: true), // No side effects
-  inputSchema: ToolInputSchema(properties: {...}),
+  annotations: ToolAnnotations(readOnlyHint: true), // No side effects
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     final stats = await database.getUserStats();
     return CallToolResult(
@@ -139,12 +182,12 @@ server.registerTool(
   'delete-all-data',
   description: 'Permanently delete all data',
   annotations: ToolAnnotations(
-    readOnly: false,
-    destructive: true, // Warn users!
+    readOnlyHint: false,
+    destructiveHint: true, // Warn users!
   ),
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
-      'confirmation': JsonSchema.string(constValue: 'DELETE'),
+      'confirmation': JsonSchema.constValue('DELETE'),
     },
     required: ['confirmation'],
   ),
@@ -163,8 +206,8 @@ server.registerTool(
 server.registerTool(
   'update-cache',
   description: 'Update cache entry',
-  annotations: ToolAnnotations(idempotent: true), // Safe to retry
-  inputSchema: ToolInputSchema(properties: {...}),
+  annotations: ToolAnnotations(idempotentHint: true), // Safe to retry
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     await cache.set(args['key'], args['value']);
     return CallToolResult(
@@ -180,8 +223,8 @@ server.registerTool(
 server.registerTool(
   'search-web',
   description: 'Search the internet',
-  annotations: ToolAnnotations(openWorld: true), // Results vary over time
-  inputSchema: ToolInputSchema(properties: {...}),
+  annotations: ToolAnnotations(openWorldHint: true), // Results vary over time
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     final results = await webSearch(args['query']);
     return CallToolResult(
@@ -190,6 +233,11 @@ server.registerTool(
   },
 );
 ```
+
+Stable MCP tool annotations are `title`, `readOnlyHint`, `destructiveHint`,
+`idempotentHint`, and `openWorldHint`. Legacy `priority` and `audience` payloads
+still parse into deprecated Dart fields for compatibility, but they are not
+emitted by `ToolAnnotations.toJson()`.
 
 ## Content Types
 
@@ -277,7 +325,7 @@ return CallToolResult(
 ```dart
 server.registerTool(
   'divide',
-  inputSchema: ToolInputSchema(properties: {...}),
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     final a = args['a'] as num;
     final b = args['b'] as num;
@@ -296,17 +344,21 @@ server.registerTool(
 );
 ```
 
-### Throw MCP Errors
+### Tool-domain Permission Errors
+
+For deliverable tool-domain failures such as permission denials, return a tool
+result with `isError: true` instead of using JSON-RPC structural error codes.
+Reserve `McpError`/`ErrorCode` for protocol-level failures or invalid arguments.
 
 ```dart
 server.registerTool(
   'admin-action',
-  inputSchema: ToolInputSchema(properties: {...}),
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     if (!await isAdmin(args['userId'])) {
-      throw McpError(
-        ErrorCode.unauthorized,
-        'Admin privileges required',
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Admin privileges required')],
       );
     }
 
@@ -320,13 +372,13 @@ server.registerTool(
 
 ```dart
 server.registerTool(
-  name: 'custom-validation',
-  inputSchema: {...},
-  callback: (args) async {
+  'custom-validation',
+  inputSchema: JsonSchema.object(properties: {...}),
+  callback: (args, extra) async {
     // Custom business logic validation
     if (!isValid(args)) {
       throw McpError(
-        ErrorCode.invalidParams,
+        ErrorCode.invalidParams.value,
         'Validation failed: ${getErrors(args)}',
       );
     }
@@ -351,7 +403,7 @@ The `callback` function receives an `extra` parameter (of type `RequestHandlerEx
 server.registerTool(
   'long-running-task',
   description: 'A task that takes some time',
-  inputSchema: ToolInputSchema(properties: {...}),
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     final totalSteps = 10;
 
@@ -377,21 +429,32 @@ server.registerTool(
 ### Cancellation Support
 
 Tools should also check for cancellation, especially if they are long-running.
+When `extra.signal.aborted` is set, stop work promptly and clean up local state.
+The protocol may suppress any response after cancellation, so do not rely on a
+thrown error being delivered to the client.
 
 ```dart
 server.registerTool(
   'cancelable-task',
-  inputSchema: ToolInputSchema(properties: {...}),
+  inputSchema: JsonSchema.object(properties: {...}),
   callback: (args, extra) async {
     // Check if cancelled at the start
     if (extra.signal.aborted) {
-      throw McpError(ErrorCode.requestCancelled, 'Task cancelled');
+      await cleanupPartialWork();
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Task cancelled')],
+      );
     }
 
     for (var i = 0; i < 1000; i++) {
       // Check for cancellation during loop
       if (extra.signal.aborted) {
-        throw McpError(ErrorCode.requestCancelled, 'Task cancelled');
+        await cleanupPartialWork();
+        return CallToolResult(
+          isError: true,
+          content: [TextContent(text: 'Task cancelled')],
+        );
       }
 
       await processItem(i);
@@ -405,45 +468,118 @@ server.registerTool(
 );
 ```
 
+## Task-Augmented Tools
+
+MCP 2025-11-25 requires task-augmented requests to be negotiated explicitly.
+For tools, the server must advertise `tasks.requests.tools.call`; a top-level
+`tasks` capability is not enough. `registerToolTask()` advertises that
+subcapability automatically when it is called before `connect()`.
+
+```dart
+final server = McpServer(
+  const Implementation(name: 'task-server', version: '1.0.0'),
+);
+
+server.experimental.registerToolTask(
+  'slow-tool',
+  description: 'Runs asynchronously and returns a task first',
+  inputSchema: const ToolInputSchema(),
+  // Defaults to ToolExecution(taskSupport: 'required'). Use 'optional' if the
+  // same tool can also return an immediate CallToolResult.
+  execution: const ToolExecution(taskSupport: 'required'),
+  handler: SlowToolTaskHandler(),
+);
+
+await server.connect(transport);
+```
+
+If a task-based tool must be registered after `connect()`, pre-advertise the
+capability in `McpServerOptions` before connecting:
+
+```dart
+final server = McpServer(
+  const Implementation(name: 'task-server', version: '1.0.0'),
+  options: const McpServerOptions(
+    capabilities: ServerCapabilities(
+      tasks: ServerCapabilitiesTasks(
+        requests: ServerCapabilitiesTasksRequests(
+          tools: ServerCapabilitiesTasksTools(
+            call: ServerCapabilitiesTasksToolsCall(),
+          ),
+        ),
+      ),
+    ),
+  ),
+);
+```
+
+Clients that call task-augmented tools can use `TaskClient.callToolStream()`.
+When the `task` argument is supplied, `TaskClient` first verifies that the server
+advertised `tasks.requests.tools.call`, then lists tools to confirm the target
+tool advertises `execution.taskSupport` as `optional` or `required`.
+
+```dart
+final taskClient = TaskClient(client);
+
+await for (final message in taskClient.callToolStream(
+  'slow-tool',
+  {'input': 'value'},
+  task: {'ttl': 60000, 'pollInterval': 1000},
+)) {
+  // Handle TaskCreatedMessage, TaskStatusMessage, TaskResultMessage,
+  // or TaskErrorMessage.
+}
+```
+
 ## Real-World Examples
 
 ### API Integration
 
 ```dart
+const nwsApiBase = 'https://api.weather.gov';
+
 server.registerTool(
-  'get-weather',
-  description: 'Get current weather for a city',
-  inputSchema: ToolInputSchema(
+  'get-alerts',
+  description: 'Get weather alerts for a US state',
+  inputSchema: JsonSchema.object(
     properties: {
-      'city': JsonSchema.string(description: 'City name'),
-      'units': JsonSchema.string(
-        enumValues: ['metric', 'imperial'],
-        defaultValue: 'metric',
+      'state': JsonSchema.string(
+        description: 'Two-letter state code, for example CA or NY',
       ),
     },
-    required: ['city'],
+    required: ['state'],
   ),
   callback: (args, extra) async {
-    final city = args['city'] as String;
-    final units = args['units'] as String? ?? 'metric';
+    final state = (args['state'] as String?)?.toUpperCase();
+    if (state == null || state.length != 2) {
+      return const CallToolResult(
+        content: [TextContent(text: 'Invalid state code provided.')],
+        isError: true,
+      );
+    }
 
-    final weather = await weatherApi.getCurrent(
-      city: city,
-      units: units,
-    );
+    final alertsData = await makeNWSRequest('$nwsApiBase/alerts?area=$state');
+    if (alertsData == null) {
+      return CallToolResult.fromContent(
+        [const TextContent(text: 'Failed to retrieve alerts data.')],
+      );
+    }
 
-    return CallToolResult(
-      content: [
-        TextContent(
-          text: 'Weather in $city:\n'
-                'Temperature: ${weather.temp}°\n'
-                'Conditions: ${weather.description}',
-        ),
-      ],
+    final features = alertsData['features'] as List<dynamic>? ?? [];
+    if (features.isEmpty) {
+      return CallToolResult.fromContent(
+        [TextContent(text: 'No active alerts for $state.')],
+      );
+    }
+
+    return CallToolResult.fromContent(
+      [TextContent(text: 'Active alerts for $state: ${features.length}')],
     );
   },
 );
 ```
+
+See [`example/weather.dart`](../example/weather.dart) for the complete National Weather Service example, including request headers, forecast lookup, and alert formatting.
 
 ### Database Query
 
@@ -451,7 +587,7 @@ server.registerTool(
 server.registerTool(
   'query-users',
   description: 'Query user database',
-  inputSchema: ToolInputSchema(
+  inputSchema: JsonSchema.object(
     properties: {
       'filters': JsonSchema.object(
         properties: {
@@ -496,8 +632,8 @@ server.registerTool(
 server.registerTool(
   'read-file',
   description: 'Read file contents',
-  annotations: ToolAnnotations(readOnly: true),
-  inputSchema: ToolInputSchema(
+  annotations: ToolAnnotations(readOnlyHint: true),
+  inputSchema: JsonSchema.object(
     properties: {
       'path': JsonSchema.string(description: 'File path'),
       'encoding': JsonSchema.string(
@@ -514,7 +650,7 @@ server.registerTool(
     // Validate path (security!)
     if (!isPathAllowed(path)) {
       throw McpError(
-        ErrorCode.invalidParams,
+        ErrorCode.invalidParams.value,
         'Access denied: $path',
       );
     }
@@ -522,7 +658,7 @@ server.registerTool(
     final file = File(path);
     if (!await file.exists()) {
       throw McpError(
-        ErrorCode.invalidParams,
+        ErrorCode.invalidParams.value,
         'File not found: $path',
       );
     }
@@ -561,7 +697,7 @@ server.registerTool(
 
 ```dart
 // ✅ Good - descriptive, with validation
-inputSchema: ToolInputSchema(
+inputSchema: JsonSchema.object(
   properties: {
     'query': JsonSchema.string(
       description: 'Search query (keywords)',
@@ -573,7 +709,7 @@ inputSchema: ToolInputSchema(
 )
 
 // ❌ Bad - minimal, no validation
-inputSchema: ToolInputSchema(
+inputSchema: JsonSchema.object(
   properties: {
     'query': JsonSchema.string(),
   },
@@ -584,16 +720,16 @@ inputSchema: ToolInputSchema(
 
 ```dart
 // ✅ Good - type checking
-callback: (args) async {
+callback: (args, extra) async {
   final count = args['count'] as int;
   if (count < 1 || count > 100) {
-    throw McpError(ErrorCode.invalidParams, 'Count out of range');
+    throw McpError(ErrorCode.invalidParams.value, 'Count out of range');
   }
   ...
 }
 
 // ❌ Bad - no type checking
-callback: (args) async {
+callback: (args, extra) async {
   final count = args['count'];  // Could be anything!
   ...
 }
@@ -603,7 +739,7 @@ callback: (args) async {
 
 ```dart
 // ✅ Good - comprehensive error handling
-callback: (args) async {
+callback: (args, extra) async {
   try {
     final result = await riskyOperation(args);
     return CallToolResult(
@@ -623,7 +759,7 @@ callback: (args) async {
 }
 
 // ❌ Bad - unhandled exceptions
-callback: (args) async {
+callback: (args, extra) async {
   final result = await riskyOperation(args);  // May throw!
   return CallToolResult(
     content: [TextContent(text: result)],
@@ -635,17 +771,23 @@ callback: (args) async {
 
 ```dart
 // ✅ Good - validate inputs, check permissions
-callback: (args) async {
+callback: (args, extra) async {
   final path = args['path'] as String;
 
   // Validate path
   if (!isPathAllowed(path)) {
-    throw McpError(ErrorCode.unauthorized, 'Access denied');
+    return CallToolResult(
+      isError: true,
+      content: [TextContent(text: 'Access denied')],
+    );
   }
 
   // Check permissions
   if (!hasPermission(args['userId'], path)) {
-    throw McpError(ErrorCode.unauthorized, 'Insufficient permissions');
+    return CallToolResult(
+      isError: true,
+      content: [TextContent(text: 'Insufficient permissions')],
+    );
   }
 
   // Sanitize input
@@ -655,7 +797,7 @@ callback: (args) async {
 }
 
 // ❌ Bad - no validation or security checks
-callback: (args) async {
+callback: (args, extra) async {
   final path = args['path'] as String;
   final file = File(path);  // Direct file access!
   return CallToolResult(...);
@@ -676,7 +818,7 @@ void main() {
 
     server.registerTool(
       'add',
-      inputSchema: ToolInputSchema(
+      inputSchema: JsonSchema.object(
         properties: {
           'a': JsonSchema.number(),
           'b': JsonSchema.number(),

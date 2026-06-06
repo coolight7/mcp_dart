@@ -1,4 +1,5 @@
 import '../types.dart';
+import 'json_rpc.dart';
 
 /// Describes an argument accepted by a prompt template.
 class PromptArgument {
@@ -53,6 +54,9 @@ class Prompt {
   final List<PromptArgument>? arguments;
 
   /// Optional icon for the prompt.
+  @Deprecated(
+    'MCP 2025-11-25 uses icons; singular icon is parsed only for legacy compatibility and is not serialized.',
+  )
   final ImageContent? icon;
 
   /// Optional set of icons for the prompt.
@@ -95,7 +99,6 @@ class Prompt {
         if (description != null) 'description': description,
         if (arguments != null)
           'arguments': arguments!.map((a) => a.toJson()).toList(),
-        if (icon != null) 'icon': icon!.toJson(),
         if (icons != null)
           'icons': icons!.map((icon) => icon.toJson()).toList(),
         if (meta != null) '_meta': meta,
@@ -129,9 +132,9 @@ class JsonRpcListPromptsRequest extends JsonRpcRequest {
 
   factory JsonRpcListPromptsRequest.fromJson(Map<String, dynamic> json) {
     final paramsMap = json['params'] as Map<String, dynamic>?;
-    final meta = paramsMap?['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcListPromptsRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       params: paramsMap == null ? null : ListPromptsRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -154,11 +157,14 @@ class ListPromptsResult implements BaseResultData {
 
   factory ListPromptsResult.fromJson(Map<String, dynamic> json) {
     final meta = json['_meta'] as Map<String, dynamic>?;
+    final prompts = json['prompts'];
+    if (prompts is! List) {
+      throw const FormatException('ListPromptsResult.prompts is required');
+    }
     return ListPromptsResult(
-      prompts: (json['prompts'] as List<dynamic>?)
-              ?.map((p) => Prompt.fromJson(p as Map<String, dynamic>))
-              .toList() ??
-          [],
+      prompts: prompts
+          .map((p) => Prompt.fromJson(p as Map<String, dynamic>))
+          .toList(),
       nextCursor: json['nextCursor'] as String?,
       meta: meta,
     );
@@ -168,6 +174,7 @@ class ListPromptsResult implements BaseResultData {
   Map<String, dynamic> toJson() => {
         'prompts': prompts.map((p) => p.toJson()).toList(),
         if (nextCursor != null) 'nextCursor': nextCursor,
+        if (meta != null) '_meta': meta,
       };
 }
 
@@ -211,9 +218,9 @@ class JsonRpcGetPromptRequest extends JsonRpcRequest {
     if (paramsMap == null) {
       throw const FormatException("Missing params for get prompt request");
     }
-    final meta = paramsMap['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcGetPromptRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       getParams: GetPromptRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -265,12 +272,15 @@ class GetPromptResult implements BaseResultData {
 
   factory GetPromptResult.fromJson(Map<String, dynamic> json) {
     final meta = json['_meta'] as Map<String, dynamic>?;
+    final messages = json['messages'];
+    if (messages is! List) {
+      throw const FormatException('GetPromptResult.messages is required');
+    }
     return GetPromptResult(
       description: json['description'] as String?,
-      messages: (json['messages'] as List<dynamic>?)
-              ?.map((m) => PromptMessage.fromJson(m as Map<String, dynamic>))
-              .toList() ??
-          [],
+      messages: messages
+          .map((m) => PromptMessage.fromJson(m as Map<String, dynamic>))
+          .toList(),
       meta: meta,
     );
   }
@@ -279,6 +289,7 @@ class GetPromptResult implements BaseResultData {
   Map<String, dynamic> toJson() => {
         if (description != null) 'description': description,
         'messages': messages.map((m) => m.toJson()).toList(),
+        if (meta != null) '_meta': meta,
       };
 }
 

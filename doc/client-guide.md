@@ -156,6 +156,35 @@ final result = await client.callTool(
 );
 ```
 
+### Task-Augmented Tool Calls
+
+For task-capable tools, use `TaskClient.callToolStream()` and pass task creation
+parameters through the `task` argument. The server must advertise
+`tasks.requests.tools.call`, and the target tool must be visible from
+`tools/list` with `execution.taskSupport` set to `optional` or `required`.
+`TaskClient` performs that `tools/list` preflight before it sends `tools/call`.
+
+```dart
+final taskClient = TaskClient(client);
+
+await for (final event in taskClient.callToolStream(
+  'slow-tool',
+  {'query': 'large job'},
+  task: {'ttl': 60000, 'pollInterval': 1000},
+)) {
+  switch (event) {
+    case TaskCreatedMessage(:final task):
+      print('Created task: ${task.taskId}');
+    case TaskStatusMessage(:final task):
+      print('Task status: ${task.status}');
+    case TaskResultMessage(:final result):
+      print('Tool result: ${result.content.length} content blocks');
+    case TaskErrorMessage(:final error):
+      print('Task error: $error');
+  }
+}
+```
+
 ### Handle Tool Errors
 
 ```dart
@@ -195,6 +224,7 @@ for (final resource in response.resources) {
   print('  URI: ${resource.uri}');
   print('  Description: ${resource.description}');
   print('  MIME: ${resource.mimeType}');
+  print('  Size: ${resource.size ?? "unknown"}');
   print('  Last modified: ${resource.annotations?.lastModified}');
   print('  Icons: ${resource.icons?.length ?? 0}');
 }
@@ -247,9 +277,18 @@ client.setNotificationHandler<JsonRpcResourceUpdatedNotification>(
       print('New content: ${(result.contents.first as TextResourceContents).text}');
     }
   },
-  (params, meta) => JsonRpcResourceUpdatedNotification(
-    updatedParams: ResourceUpdatedNotification.fromJson(params ?? {}),
-  ),
+  (params, meta) {
+    if (params == null) {
+      throw const FormatException(
+        'Missing params for resource update notification',
+      );
+    }
+
+    return JsonRpcResourceUpdatedNotification(
+      updatedParams: ResourceUpdatedNotification.fromJson(params),
+      meta: meta,
+    );
+  },
 );
 
 // Unsubscribe when done
@@ -432,13 +471,15 @@ Get argument completion suggestions:
 // Complete resource template variable
 final result = await client.complete(
   CompleteRequest(
-    ref: CompletionReference(
-      type: CompletionReferenceType.resourceRef,
-      uri: 'users://{userId}/profile',
+    ref: const ResourceReference(
+      uri: 'users://{organization}/{userId}/profile',
     ),
-    argument: CompletionArgument(
+    argument: const ArgumentCompletionInfo(
       name: 'userId',
       value: 'ali',  // Partial value
+    ),
+    context: const CompletionContext(
+      arguments: {'organization': 'engineering'},
     ),
   ),
 );
@@ -457,13 +498,16 @@ if (result.completion.hasMore == true) {
 // Complete prompt argument
 final result = await client.complete(
   CompleteRequest(
-    ref: CompletionReference(
-      type: CompletionReferenceType.promptRef,
+    ref: const PromptReference(
       name: 'translate',
+      title: 'Translate text',
     ),
-    argument: CompletionArgument(
+    argument: const ArgumentCompletionInfo(
       name: 'target_language',
       value: 'Spa',  // Partial value
+    ),
+    context: const CompletionContext(
+      arguments: {'source_language': 'English'},
     ),
   ),
 );
@@ -500,6 +544,7 @@ client.onListRoots = () async {
       Root(
         uri: 'file:///home/user/projects',
         name: 'Projects',
+        meta: {'workspace': 'primary'},
       ),
       Root(
         uri: 'file:///home/user/documents',
@@ -539,9 +584,18 @@ client.setNotificationHandler<JsonRpcLoggingMessageNotification>(
 
     print('[$level] $logger: $message');
   },
-  (params, meta) => JsonRpcLoggingMessageNotification(
-    logParams: LoggingMessageNotification.fromJson(params ?? {}),
-  ),
+  (params, meta) {
+    if (params == null) {
+      throw const FormatException(
+        'Missing params for logging message notification',
+      );
+    }
+
+    return JsonRpcLoggingMessageNotification(
+      logParams: LoggingMessageNotification.fromJson(params),
+      meta: meta,
+    );
+  },
 );
 ```
 
@@ -592,7 +646,7 @@ Future<void> connectWithRetry(McpClient client, Transport transport) async {
 
 ```dart
 // After connection, check server capabilities
-final serverCapabilities = client.serverCapabilities;
+final serverCapabilities = client.getServerCapabilities();
 
 if (serverCapabilities?.tools != null) {
   print('Server supports tools');
@@ -647,14 +701,14 @@ Future<CallToolResult?> callToolSafely(
       ),
     );
   } on McpError catch (e) {
-    switch (e.code) {
+    switch (ErrorCode.fromValue(e.code)) {
       case ErrorCode.methodNotFound:
         print('Tool not found: $toolName');
         break;
       case ErrorCode.invalidParams:
         print('Invalid parameters for $toolName: ${e.message}');
         break;
-      case ErrorCode.timeout:
+      case ErrorCode.requestTimeout:
         print('Tool call timed out');
         break;
       default:
@@ -739,7 +793,7 @@ processResult(result);
 
 ```dart
 // ✅ Good
-if (client.serverCapabilities?.resources?.subscribe == true) {
+if (client.getServerCapabilities()?.resources?.subscribe == true) {
   await client.subscribeResource(SubscribeRequest(uri: uri));
 } else {
   // Fallback: poll for changes

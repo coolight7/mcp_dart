@@ -2,9 +2,12 @@ import 'dart:async';
 import 'package:mcp_dart/mcp_dart.dart';
 import 'package:test/test.dart';
 
-class MockClient implements Client {
+class MockClient implements McpClient {
   final Map<String, dynamic> _responses = {};
   final List<JsonRpcRequest> requests = [];
+  bool supportsTaskAugmentedTools = true;
+  List<Tool> listedTools = const [];
+  Map<String?, ListToolsResult> listedToolPages = const {};
 
   void mockResponse(String method, dynamic response) {
     _responses[method] = response;
@@ -61,6 +64,29 @@ class MockClient implements Client {
   }
 
   @override
+  void assertTaskCapability(String method) {
+    if (!supportsTaskAugmentedTools) {
+      throw McpError(
+        ErrorCode.invalidRequest.value,
+        "Server does not support capability 'tasks.requests.tools.call' required for task-based '$method'",
+      );
+    }
+  }
+
+  @override
+  Future<ListToolsResult> listTools({
+    ListToolsRequest? params,
+    RequestOptions? options,
+  }) async {
+    requests.add(JsonRpcListToolsRequest(id: -1, params: params?.toJson()));
+    if (listedToolPages.isNotEmpty) {
+      return listedToolPages[params?.cursor] ??
+          const ListToolsResult(tools: []);
+    }
+    return ListToolsResult(tools: listedTools);
+  }
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -103,6 +129,9 @@ void main() {
         'task': {
           'taskId': taskId,
           'status': 'working',
+          'createdAt': '2026-05-14T10:00:00Z',
+          'lastUpdatedAt': '2026-05-14T10:00:00Z',
+          'ttl': null,
           'name': 'Long Task',
           'total': 100,
         },
@@ -114,6 +143,9 @@ void main() {
         {
           'taskId': taskId,
           'status': 'working',
+          'createdAt': '2026-05-14T10:00:00Z',
+          'lastUpdatedAt': '2026-05-14T10:01:00Z',
+          'ttl': null,
           'name': 'Long Task',
           'progress': 50,
           'pollInterval': 10,
@@ -122,6 +154,9 @@ void main() {
         {
           'taskId': taskId,
           'status': 'completed',
+          'createdAt': '2026-05-14T10:00:00Z',
+          'lastUpdatedAt': '2026-05-14T10:02:00Z',
+          'ttl': null,
           'name': 'Long Task',
           'progress': 100,
         }
@@ -183,11 +218,166 @@ void main() {
       );
     });
 
+    test(
+        'callToolStream rejects task augmentation without negotiated server support',
+        () async {
+      mockClient.supportsTaskAugmentedTools = false;
+
+      final events = await taskClient.callToolStream(
+        'task-tool',
+        {},
+        task: {'ttl': 1000},
+      ).toList();
+
+      expect(events, hasLength(1));
+      expect(events.single, isA<TaskErrorMessage>());
+      final error = (events.single as TaskErrorMessage).error;
+      expect(error, isA<McpError>());
+      expect(error.toString(), contains('tasks.requests.tools.call'));
+      expect(mockClient.requests, isEmpty);
+    });
+
+    test('callToolStream rejects task augmentation when tool forbids tasks',
+        () async {
+      mockClient.listedTools = const [
+        Tool(
+          name: 'sync-tool',
+          inputSchema: ToolInputSchema(),
+          execution: ToolExecution(taskSupport: 'forbidden'),
+        ),
+      ];
+
+      final events = await taskClient.callToolStream(
+        'sync-tool',
+        {},
+        task: {'ttl': 1000},
+      ).toList();
+
+      expect(events, hasLength(1));
+      expect(events.single, isA<TaskErrorMessage>());
+      expect(
+        (events.single as TaskErrorMessage).error.toString(),
+        contains("does not support task augmentation"),
+      );
+      expect(mockClient.requests.map((r) => r.method), [Method.toolsList]);
+    });
+
+    test('callToolStream rejects task augmentation when tool is not advertised',
+        () async {
+      mockClient.listedTools = const [
+        Tool(
+          name: 'other-tool',
+          inputSchema: ToolInputSchema(),
+          execution: ToolExecution(taskSupport: 'optional'),
+        ),
+      ];
+
+      final events = await taskClient.callToolStream(
+        'missing-tool',
+        {},
+        task: {'ttl': 1000},
+      ).toList();
+
+      expect(events, hasLength(1));
+      expect(events.single, isA<TaskErrorMessage>());
+      expect(
+        (events.single as TaskErrorMessage).error.toString(),
+        contains('was not advertised by tools/list'),
+      );
+      expect(mockClient.requests.map((r) => r.method), [Method.toolsList]);
+    });
+
+    test(
+        'callToolStream allows task augmentation when server and tool permit it',
+        () async {
+      mockClient.listedTools = const [
+        Tool(
+          name: 'task-tool',
+          inputSchema: ToolInputSchema(),
+          execution: ToolExecution(taskSupport: 'optional'),
+        ),
+      ];
+      mockClient.mockResponse('tools/call', {
+        'content': [
+          {'type': 'text', 'text': 'Task-capable immediate result'},
+        ],
+      });
+
+      final events = await taskClient.callToolStream(
+        'task-tool',
+        {},
+        task: {'ttl': 1000},
+      ).toList();
+
+      expect(events, hasLength(1));
+      expect(events.single, isA<TaskResultMessage>());
+      expect(mockClient.requests.map((r) => r.method), [
+        Method.toolsList,
+        Method.toolsCall,
+      ]);
+      expect(mockClient.requests.last.params?['task'], {'ttl': 1000});
+    });
+
+    test('callToolStream finds task-capable tools on later list pages',
+        () async {
+      mockClient.listedToolPages = const {
+        null: ListToolsResult(
+          tools: [
+            Tool(name: 'other-tool', inputSchema: ToolInputSchema()),
+          ],
+          nextCursor: 'page-2',
+        ),
+        'page-2': ListToolsResult(
+          tools: [
+            Tool(
+              name: 'task-tool',
+              inputSchema: ToolInputSchema(),
+              execution: ToolExecution(taskSupport: 'optional'),
+            ),
+          ],
+        ),
+      };
+      mockClient.mockResponse('tools/call', {
+        'content': [
+          {'type': 'text', 'text': 'Task-capable paged result'},
+        ],
+      });
+
+      final events = await taskClient.callToolStream(
+        'task-tool',
+        {},
+        task: {'ttl': 1000},
+      ).toList();
+
+      expect(events, hasLength(1));
+      expect(events.single, isA<TaskResultMessage>());
+      expect(mockClient.requests.map((r) => r.method), [
+        Method.toolsList,
+        Method.toolsList,
+        Method.toolsCall,
+      ]);
+      expect(mockClient.requests[1].params?['cursor'], 'page-2');
+    });
+
     test('listTasks returns list of tasks', () async {
       mockClient.mockResponse('tasks/list', {
         'tasks': [
-          {'taskId': '1', 'status': 'working', 'name': 'Task 1'},
-          {'taskId': '2', 'status': 'working', 'name': 'Task 2'},
+          {
+            'taskId': '1',
+            'status': 'working',
+            'createdAt': '2026-05-14T10:00:00Z',
+            'lastUpdatedAt': '2026-05-14T10:01:00Z',
+            'ttl': null,
+            'name': 'Task 1',
+          },
+          {
+            'taskId': '2',
+            'status': 'working',
+            'createdAt': '2026-05-14T10:00:00Z',
+            'lastUpdatedAt': '2026-05-14T10:01:00Z',
+            'ttl': null,
+            'name': 'Task 2',
+          },
         ],
       });
 
@@ -198,9 +388,58 @@ void main() {
       expect(tasks[1].taskId, '2');
     });
 
-    test('cancelTask sends cancel request', () async {
+    test('cancelTaskWithResult sends cancel request and returns final task',
+        () async {
+      mockClient.mockResponse('tasks/cancel', {
+        'taskId': 'task-123',
+        'status': 'cancelled',
+        'statusMessage': 'Task cancelled',
+        'createdAt': '2026-05-14T10:00:00Z',
+        'lastUpdatedAt': '2026-05-14T10:05:00Z',
+        'ttl': null,
+      });
+
+      final task = await taskClient.cancelTaskWithResult('task-123');
+
+      expect(mockClient.requests.last.method, 'tasks/cancel');
+      expect(
+        (mockClient.requests.last as JsonRpcCancelTaskRequest)
+            .cancelParams
+            .taskId,
+        'task-123',
+      );
+      expect(task.taskId, 'task-123');
+      expect(task.status, TaskStatus.cancelled);
+      expect(task.ttl, isNull);
+    });
+
+    test('legacy cancelTask sends cancel request and accepts empty result',
+        () async {
       mockClient.mockResponse('tasks/cancel', {});
 
+      // ignore: deprecated_member_use_from_same_package
+      await taskClient.cancelTask('task-123');
+
+      expect(mockClient.requests.last.method, 'tasks/cancel');
+      expect(
+        (mockClient.requests.last as JsonRpcCancelTaskRequest)
+            .cancelParams
+            .taskId,
+        'task-123',
+      );
+    });
+
+    test('legacy cancelTask ignores compliant final task result', () async {
+      mockClient.mockResponse('tasks/cancel', {
+        'taskId': 'task-123',
+        'status': 'cancelled',
+        'statusMessage': 'Task cancelled',
+        'createdAt': '2026-05-14T10:00:00Z',
+        'lastUpdatedAt': '2026-05-14T10:05:00Z',
+        'ttl': null,
+      });
+
+      // ignore: deprecated_member_use_from_same_package
       await taskClient.cancelTask('task-123');
 
       expect(mockClient.requests.last.method, 'tasks/cancel');

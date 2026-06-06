@@ -22,8 +22,6 @@ class McpClientOptions extends ProtocolOptions {
 @Deprecated('Use McpClientOptions instead')
 typedef ClientOptions = McpClientOptions;
 
-/// Recursively applies default values from a JSON Schema to a data object.
-/// Recursively applies default values from a JSON Schema to a data object.
 // Recursively applies default values from a JSON Schema to a data object.
 void _applyElicitationDefaults(JsonSchema schema, Map<String, dynamic> data) {
   if (schema is! JsonObject) return;
@@ -62,8 +60,6 @@ dynamic _deepCopy(dynamic value) {
   }
 }
 
-// Unused _applyDefaultsFromMap removed
-
 /// An MCP client implementation built on top of a pluggable [Transport].
 ///
 /// Handles the initialization handshake with the server upon connection
@@ -74,6 +70,8 @@ class McpClient extends Protocol {
   ClientCapabilities _capabilities;
   final Implementation _clientInfo;
   String? _instructions;
+  Future<void>? _sessionRefresh;
+  bool _sentInitialized = false;
 
   final Map<String, JsonSchema> _cachedToolOutputSchemas = {};
   final Set<String> _cachedRequiredTaskTools = {};
@@ -102,11 +100,25 @@ class McpClient extends Protocol {
   McpClient(this._clientInfo, {McpClientOptions? options})
       : _capabilities = options?.capabilities ?? const ClientCapabilities(),
         super(options) {
-    // Register elicit handler if capability is present
-    if (_capabilities.elicitation?.form != null) {
+    // Register elicit handler if any elicitation mode is advertised.
+    if (_capabilities.elicitation != null) {
       setRequestHandler<JsonRpcElicitRequest>(
         Method.elicitationCreate,
         (request, extra) async {
+          if (request.elicitParams.isUrlMode &&
+              _capabilities.elicitation?.url == null) {
+            throw McpError(
+              ErrorCode.invalidParams.value,
+              "Client does not support URL elicitation.",
+            );
+          }
+          if (request.elicitParams.isFormMode &&
+              _capabilities.elicitation?.form == null) {
+            throw McpError(
+              ErrorCode.invalidParams.value,
+              "Client does not support form elicitation.",
+            );
+          }
           if (onElicitRequest == null) {
             throw McpError(
               ErrorCode.methodNotFound.value,
@@ -116,7 +128,7 @@ class McpClient extends Protocol {
           final result = await onElicitRequest!(request.elicitParams);
 
           // Apply defaults if client supports it and it's a form elicitation
-          if (request.elicitParams.mode == ElicitationMode.form &&
+          if (request.elicitParams.isFormMode &&
               result.action == 'accept' &&
               result.content is Map &&
               request.elicitParams.requestedSchema != null &&
@@ -161,6 +173,14 @@ class McpClient extends Protocol {
               "No sampling handler registered",
             );
           }
+          if ((request.createParams.tools != null ||
+                  request.createParams.toolChoice != null) &&
+              _capabilities.sampling?.tools != true) {
+            throw McpError(
+              ErrorCode.invalidRequest.value,
+              "Client does not support 'sampling.tools' capability required by sampling/createMessage request.",
+            );
+          }
           return await onSamplingRequest!(request.createParams);
         },
         (id, params, meta) => JsonRpcCreateMessageRequest(
@@ -187,6 +207,55 @@ class McpClient extends Protocol {
     );
   }
 
+  Future<void> _initializeSession(Transport transport) async {
+    _sentInitialized = false;
+
+    final initParams = InitializeRequest(
+      protocolVersion: latestProtocolVersion,
+      capabilities: _capabilities,
+      clientInfo: _clientInfo,
+    );
+
+    final initRequest = JsonRpcInitializeRequest(
+      id: -1,
+      initParams: initParams,
+    );
+
+    final InitializeResult result = await request<InitializeResult>(
+      initRequest,
+      (json) => InitializeResult.fromJson(json),
+    );
+
+    if (!supportedProtocolVersions.contains(result.protocolVersion)) {
+      throw McpError(
+        ErrorCode.internalError.value,
+        "Server's chosen protocol version is not supported by client: ${result.protocolVersion}. Supported: $supportedProtocolVersions",
+      );
+    }
+
+    _serverCapabilities = result.capabilities;
+    _serverVersion = result.serverInfo;
+    _instructions = result.instructions;
+
+    if (transport is ProtocolVersionAwareTransport) {
+      (transport as ProtocolVersionAwareTransport).protocolVersion =
+          result.protocolVersion;
+    }
+
+    const initializedNotification = JsonRpcInitializedNotification();
+    try {
+      await notification(initializedNotification);
+      _sentInitialized = true;
+    } catch (_) {
+      _sentInitialized = false;
+      rethrow;
+    }
+
+    _logger.debug(
+      "MCP Client Initialized. Server: ${result.serverInfo.name} ${result.serverInfo.version}, Protocol: ${result.protocolVersion}",
+    );
+  }
+
   /// Connects to the server using the given [transport].
   ///
   /// Initiates the MCP initialization handshake and processes the result.
@@ -194,53 +263,64 @@ class McpClient extends Protocol {
   Future<void> connect(Transport transport) async {
     await super.connect(transport);
 
-    if (transport.sessionId != null) {
-      return;
-    }
-
     try {
-      final initParams = InitializeRequest(
-        protocolVersion: latestProtocolVersion,
-        capabilities: _capabilities,
-        clientInfo: _clientInfo,
-      );
-
-      final initRequest = JsonRpcInitializeRequest(
-        id: -1,
-        initParams: initParams,
-      );
-
-      final InitializeResult result = await request<InitializeResult>(
-        initRequest,
-        (json) => InitializeResult.fromJson(json),
-      );
-
-      if (!supportedProtocolVersions.contains(result.protocolVersion)) {
-        throw McpError(
-          ErrorCode.internalError.value,
-          "Server's chosen protocol version is not supported by client: ${result.protocolVersion}. Supported: $supportedProtocolVersions",
-        );
-      }
-
-      _serverCapabilities = result.capabilities;
-      _serverVersion = result.serverInfo;
-      _instructions = result.instructions;
-
-      if (transport is ProtocolVersionAwareTransport) {
-        (transport as ProtocolVersionAwareTransport).protocolVersion =
-            result.protocolVersion;
-      }
-
-      const initializedNotification = JsonRpcInitializedNotification();
-      await notification(initializedNotification);
-
-      _logger.debug(
-        "MCP Client Initialized. Server: ${result.serverInfo.name} ${result.serverInfo.version}, Protocol: ${result.protocolVersion}",
-      );
+      await _initializeSession(transport);
     } catch (error) {
       _logger.error("MCP Client Initialization Failed: $error");
       await close();
       rethrow;
+    }
+  }
+
+  @override
+  Future<T> request<T extends BaseResultData>(
+    JsonRpcRequest requestData,
+    T Function(Map<String, dynamic> resultJson) resultFactory, [
+    RequestOptions? options,
+    int? relatedRequestId,
+  ]) async {
+    try {
+      return await super.request<T>(
+        requestData,
+        resultFactory,
+        options,
+        relatedRequestId,
+      );
+    } catch (error) {
+      if (error is! StaleSessionError || requestData.method == 'initialize') {
+        rethrow;
+      }
+
+      final activeTransport = transport;
+      if (activeTransport == null) {
+        rethrow;
+      }
+
+      final rejectedSessionId = error.sessionId;
+      final currentSessionId = activeTransport.sessionId;
+      final refreshAlreadyInProgress = _sessionRefresh;
+      if (refreshAlreadyInProgress != null) {
+        await refreshAlreadyInProgress;
+      } else if (rejectedSessionId == null ||
+          currentSessionId == null ||
+          currentSessionId == rejectedSessionId) {
+        final refresh = _initializeSession(activeTransport);
+        _sessionRefresh = refresh;
+        try {
+          await refresh;
+        } finally {
+          if (identical(_sessionRefresh, refresh)) {
+            _sessionRefresh = null;
+          }
+        }
+      }
+
+      return await super.request<T>(
+        requestData,
+        resultFactory,
+        options,
+        relatedRequestId,
+      );
     }
   }
 
@@ -252,6 +332,37 @@ class McpClient extends Protocol {
 
   /// Gets the server's instructions provided during initialization, if any.
   String? getInstructions() => _instructions;
+
+  @override
+  McpError? validateIncomingRequest(JsonRpcRequest request) {
+    if (_sentInitialized || request.method == Method.ping) {
+      return null;
+    }
+
+    return McpError(
+      ErrorCode.invalidRequest.value,
+      "Received ${request.method} before notifications/initialized was sent.",
+    );
+  }
+
+  @override
+  McpError? validateIncomingNotification(JsonRpcNotification notification) {
+    if (_sentInitialized) {
+      return null;
+    }
+
+    switch (notification.method) {
+      case Method.notificationsMessage:
+      case Method.notificationsCancelled:
+      case Method.notificationsProgress:
+        return null;
+      default:
+        return McpError(
+          ErrorCode.invalidRequest.value,
+          "Received ${notification.method} before notifications/initialized was sent.",
+        );
+    }
+  }
 
   @override
   void assertCapabilityForMethod(String method) {
@@ -360,19 +471,40 @@ class McpClient extends Protocol {
 
   @override
   void assertTaskCapability(String method) {
-    if (_serverCapabilities?.tasks == null) {
+    final missingCapability = switch (method) {
+      Method.toolsCall =>
+        _serverCapabilities?.tasks?.requests?.tools?.call == null
+            ? 'tasks.requests.tools.call'
+            : null,
+      _ =>
+        _serverCapabilities?.tasks == null ? 'tasks' : 'tasks.requests.$method',
+    };
+
+    if (missingCapability != null) {
       throw McpError(
         ErrorCode.invalidRequest.value,
-        "Server does not support tasks capability (required for task-based '$method')",
+        "Server does not support capability '$missingCapability' required for task-based '$method'",
       );
     }
   }
 
   @override
   void assertTaskHandlerCapability(String method) {
-    if (_capabilities.tasks == null) {
+    final missingCapability = switch (method) {
+      Method.samplingCreateMessage =>
+        _capabilities.tasks?.requests?.sampling?.createMessage == null
+            ? 'tasks.requests.sampling.createMessage'
+            : null,
+      Method.elicitationCreate =>
+        _capabilities.tasks?.requests?.elicitation?.create == null
+            ? 'tasks.requests.elicitation.create'
+            : null,
+      _ => _capabilities.tasks == null ? 'tasks' : 'tasks.requests.$method',
+    };
+
+    if (missingCapability != null) {
       throw StateError(
-        "Client setup error: Cannot handle task-based '$method' without 'tasks' capability registered.",
+        "Client setup error: Cannot handle task-based '$method' without '$missingCapability' capability registered.",
       );
     }
   }

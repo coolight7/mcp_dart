@@ -1,14 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'dart:async';
 import 'package:args/command_runner.dart';
 import 'package:mason/mason.dart';
-import 'package:yaml/yaml.dart';
 import 'package:path/path.dart' as p;
-import 'package:watcher/watcher.dart';
 import 'package:stream_transform/stream_transform.dart';
+import 'package:watcher/watcher.dart';
+
 import 'runner_script_generator.dart';
+import 'utils/pubspec_utils.dart';
 
 class ServeCommand extends Command<int> {
   @override
@@ -53,9 +54,7 @@ class ServeCommand extends Command<int> {
       return ExitCode.usage.code;
     }
 
-    final pubspecContent = pubspecFile.readAsStringSync();
-    final pubspecYaml = loadYaml(pubspecContent);
-    final packageName = pubspecYaml['name'] as String?;
+    final packageName = await readPackageNameFromPubspec(pubspecFile);
 
     if (packageName == null) {
       _logger.err('Error: Could not determine package name from pubspec.yaml.');
@@ -90,11 +89,19 @@ class ServeCommand extends Command<int> {
 
     Future<void> startServer() async {
       if (process != null) {
-        _logger.info('Restarting server...');
+        if (transport == 'stdio') {
+          _logger.detail('Restarting MCP server...');
+        } else {
+          _logger.info('Restarting server...');
+        }
         process!.kill();
         await process!.exitCode;
       } else {
-        _logger.info('Starting MCP server ($packageName)...');
+        if (transport == 'stdio') {
+          _logger.detail('Starting MCP server ($packageName)...');
+        } else {
+          _logger.info('Starting MCP server ($packageName)...');
+        }
       }
 
       process = await Process.start(

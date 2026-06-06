@@ -8,6 +8,301 @@ import {
   ElicitRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Progress } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+
+type TaskWireShape = {
+  taskId?: unknown;
+  status?: unknown;
+  ttl?: unknown;
+  pollInterval?: unknown;
+  createdAt?: unknown;
+  lastUpdatedAt?: unknown;
+};
+
+type RelatedTaskMetaShape = {
+  _meta?: {
+    'io.modelcontextprotocol/related-task'?: { taskId?: unknown };
+    relatedTask?: { taskId?: unknown };
+  };
+};
+
+function assertTaskWireShape(task: unknown, label: string): void {
+  if (typeof task !== 'object' || task === null) {
+    throw new Error(`${label} was not an object: ${JSON.stringify(task)}`);
+  }
+
+  const taskShape = task as TaskWireShape;
+  if (typeof taskShape.taskId !== 'string' || taskShape.taskId.length === 0) {
+    throw new Error(`${label} missing string taskId: ${JSON.stringify(task)}`);
+  }
+  if (typeof taskShape.status !== 'string' || taskShape.status.length === 0) {
+    throw new Error(`${label} missing string status: ${JSON.stringify(task)}`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(taskShape, 'ttl')) {
+    throw new Error(
+      `${label} missing required ttl key: ${JSON.stringify(task)}`
+    );
+  }
+  if (taskShape.ttl !== null && typeof taskShape.ttl !== 'number') {
+    throw new Error(`${label} has invalid ttl: ${JSON.stringify(task)}`);
+  }
+  if (
+    taskShape.pollInterval !== undefined &&
+    typeof taskShape.pollInterval !== 'number'
+  ) {
+    throw new Error(
+      `${label} has invalid pollInterval: ${JSON.stringify(task)}`
+    );
+  }
+  if (typeof taskShape.createdAt !== 'string') {
+    throw new Error(
+      `${label} missing string createdAt: ${JSON.stringify(task)}`
+    );
+  }
+  if (typeof taskShape.lastUpdatedAt !== 'string') {
+    throw new Error(
+      `${label} missing string lastUpdatedAt: ${JSON.stringify(task)}`
+    );
+  }
+}
+
+function assertRelatedTaskMeta(
+  result: unknown,
+  expectedTaskId: string,
+  label: string
+): void {
+  if (typeof result !== 'object' || result === null) {
+    throw new Error(`${label} was not an object: ${JSON.stringify(result)}`);
+  }
+
+  const meta = (result as RelatedTaskMetaShape)._meta;
+  const relatedTask = meta?.['io.modelcontextprotocol/related-task'];
+  const legacyRelatedTask = meta?.relatedTask;
+
+  if (relatedTask?.taskId !== expectedTaskId) {
+    throw new Error(
+      `${label} missing related-task metadata for ${expectedTaskId}: ${JSON.stringify(result)}`
+    );
+  }
+  if (legacyRelatedTask?.taskId !== expectedTaskId) {
+    throw new Error(
+      `${label} missing legacy relatedTask metadata for ${expectedTaskId}: ${JSON.stringify(result)}`
+    );
+  }
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} was not an object: ${JSON.stringify(value)}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertTitledEnumSchema(tools: unknown): void {
+  const toolsResult = requireRecord(tools, 'tools/list result');
+  const toolList = toolsResult.tools;
+  if (!Array.isArray(toolList)) {
+    throw new Error(
+      `tools/list result missing tools array: ${JSON.stringify(tools)}`
+    );
+  }
+
+  const chooseModeTool = toolList
+    .map((tool) => requireRecord(tool, 'tool'))
+    .find((tool) => tool.name === 'choose_mode');
+  if (!chooseModeTool) {
+    throw new Error('choose_mode tool was not listed');
+  }
+
+  const inputSchema = requireRecord(
+    chooseModeTool.inputSchema,
+    'choose_mode inputSchema'
+  );
+  const properties = requireRecord(
+    inputSchema.properties,
+    'choose_mode properties'
+  );
+  const mode = requireRecord(properties.mode, 'choose_mode mode schema');
+  const modeChoices = mode.oneOf;
+  if (!Array.isArray(modeChoices)) {
+    throw new Error(`mode schema missing oneOf: ${JSON.stringify(mode)}`);
+  }
+  const complexChoice = modeChoices
+    .map((choice) => requireRecord(choice, 'mode choice'))
+    .find((choice) => choice.const === 'complex');
+  if (complexChoice?.title !== 'Complex Option') {
+    throw new Error(
+      `mode schema missing const/title choice: ${JSON.stringify(mode)}`
+    );
+  }
+
+  const permissions = requireRecord(
+    properties.permissions,
+    'choose_mode permissions schema'
+  );
+  const permissionItems = requireRecord(
+    permissions.items,
+    'choose_mode permissions items schema'
+  );
+  const permissionChoices = permissionItems.anyOf;
+  if (!Array.isArray(permissionChoices)) {
+    throw new Error(
+      `permissions item schema missing anyOf: ${JSON.stringify(permissionItems)}`
+    );
+  }
+  const writeChoice = permissionChoices
+    .map((choice) => requireRecord(choice, 'permission choice'))
+    .find((choice) => choice.const === 'write');
+  if (writeChoice?.title !== 'Write') {
+    throw new Error(
+      `permissions schema missing const/title choice: ${JSON.stringify(permissionItems)}`
+    );
+  }
+}
+
+function requireArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} was not an array: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function assertNoField(
+  value: Record<string, unknown>,
+  key: string,
+  label: string
+): void {
+  if (hasOwn(value, key)) {
+    throw new Error(
+      `${label} unexpectedly included ${key}: ${JSON.stringify(value)}`
+    );
+  }
+}
+
+function assertIconList(value: unknown, label: string): void {
+  const icons = requireArray(value, `${label} icons`);
+  if (icons.length === 0) {
+    throw new Error(`${label} icons was empty`);
+  }
+
+  const icon = requireRecord(icons[0], `${label} icon`);
+  if (
+    typeof icon.src !== 'string' ||
+    !icon.src.startsWith('data:image/png;base64,')
+  ) {
+    throw new Error(
+      `${label} icon src was not a data URI: ${JSON.stringify(icon)}`
+    );
+  }
+  if (icon.mimeType !== 'image/png') {
+    throw new Error(`${label} icon mimeType mismatch: ${JSON.stringify(icon)}`);
+  }
+  if (icon.theme !== 'dark') {
+    throw new Error(`${label} icon theme mismatch: ${JSON.stringify(icon)}`);
+  }
+}
+
+async function assertRawDartServerWireShapes(client: Client): Promise<void> {
+  const capabilities = client.getServerCapabilities() as
+    | Record<string, unknown>
+    | undefined;
+  if (capabilities) {
+    assertNoField(capabilities, 'elicitation', 'server capabilities');
+    const taskCapabilities = capabilities.tasks;
+    if (taskCapabilities !== undefined) {
+      assertNoField(
+        requireRecord(taskCapabilities, 'server task capabilities'),
+        'listChanged',
+        'server task capabilities'
+      );
+    }
+  }
+
+  const rawTools = (await client.request(
+    { method: 'tools/list' } as any,
+    z.any()
+  )) as unknown;
+  const toolList = requireArray(
+    requireRecord(rawTools, 'raw tools/list result').tools,
+    'raw tools/list tools'
+  ).map((tool) => requireRecord(tool, 'raw tool'));
+  for (const tool of toolList) {
+    const inputSchema = requireRecord(tool.inputSchema, 'raw tool inputSchema');
+    if (inputSchema.type !== 'object') {
+      throw new Error(
+        `tool inputSchema was not object-root: ${JSON.stringify(tool)}`
+      );
+    }
+    if (tool.outputSchema !== undefined) {
+      const outputSchema = requireRecord(
+        tool.outputSchema,
+        'raw tool outputSchema'
+      );
+      if (outputSchema.type !== 'object') {
+        throw new Error(
+          `tool outputSchema was not object-root: ${JSON.stringify(tool)}`
+        );
+      }
+    }
+  }
+
+  const chooseModeTool = toolList.find((tool) => tool.name === 'choose_mode');
+  if (!chooseModeTool) {
+    throw new Error('raw tools/list missing choose_mode');
+  }
+  const annotations = requireRecord(
+    chooseModeTool.annotations,
+    'choose_mode annotations'
+  );
+  if (annotations.title !== 'Mode chooser') {
+    throw new Error(
+      `choose_mode title missing: ${JSON.stringify(annotations)}`
+    );
+  }
+  assertNoField(annotations, 'priority', 'choose_mode annotations');
+  assertNoField(annotations, 'audience', 'choose_mode annotations');
+
+  const rawResources = (await client.request(
+    { method: 'resources/list' } as any,
+    z.any()
+  )) as unknown;
+  const resources = requireArray(
+    requireRecord(rawResources, 'raw resources/list result').resources,
+    'raw resources/list resources'
+  ).map((resource) => requireRecord(resource, 'raw resource'));
+  const iconResource = resources.find(
+    (resource) => resource.uri === 'resource://legacy-icon'
+  );
+  if (!iconResource) {
+    throw new Error('raw resources/list missing legacy icon resource');
+  }
+  if (iconResource.title !== 'Legacy Icon Resource Title') {
+    throw new Error(`resource title missing: ${JSON.stringify(iconResource)}`);
+  }
+  assertIconList(iconResource.icons, 'legacy icon resource');
+  assertNoField(iconResource, 'icon', 'legacy icon resource');
+
+  const rawPrompts = (await client.request(
+    { method: 'prompts/list' } as any,
+    z.any()
+  )) as unknown;
+  const prompts = requireArray(
+    requireRecord(rawPrompts, 'raw prompts/list result').prompts,
+    'raw prompts/list prompts'
+  ).map((prompt) => requireRecord(prompt, 'raw prompt'));
+  const iconPrompt = prompts.find(
+    (prompt) => prompt.name === 'legacy_icon_prompt'
+  );
+  if (!iconPrompt) {
+    throw new Error('raw prompts/list missing legacy icon prompt');
+  }
+  assertIconList(iconPrompt.icons, 'legacy icon prompt');
+  assertNoField(iconPrompt, 'icon', 'legacy icon prompt');
+}
 
 async function main() {
   const args = process.argv.slice(2);
@@ -77,7 +372,11 @@ async function main() {
   client.setRequestHandler(ListRootsRequestSchema, async () => {
     return {
       roots: [
-        { uri: 'file:///home/user/documents', name: 'Documents' },
+        {
+          uri: 'file:///home/user/documents',
+          name: 'Documents',
+          _meta: { source: 'ts-client' },
+        },
         { uri: 'file:///home/user/projects', name: 'Projects' },
       ],
     };
@@ -91,7 +390,9 @@ async function main() {
         }
 
         const maybeBlock = item as { type?: unknown; text?: unknown };
-        return maybeBlock.type === 'text' && typeof maybeBlock.text === 'string';
+        return (
+          maybeBlock.type === 'text' && typeof maybeBlock.text === 'string'
+        );
       }) as { text?: string } | undefined;
 
       if (typeof firstTextBlock?.text === 'string') {
@@ -161,9 +462,15 @@ async function main() {
     // 1. List Tools
     const tools = await client.listTools();
     const toolNames = tools.tools.map((t) => t.name);
-    if (!toolNames.includes('echo') || !toolNames.includes('add')) {
+    if (
+      !toolNames.includes('echo') ||
+      !toolNames.includes('add') ||
+      !toolNames.includes('choose_mode')
+    ) {
       throw new Error(`Missing tools. Found: ${toolNames}`);
     }
+    assertTitledEnumSchema(tools);
+    await assertRawDartServerWireShapes(client);
 
     // 2. Call Tool 'echo'
     const echoResult = await client.callTool({
@@ -221,6 +528,9 @@ async function main() {
     if (!listTasksResult.tasks) {
       throw new Error("tasks/list response missing 'tasks' array");
     }
+    listTasksResult.tasks.forEach((task, index) => {
+      assertTaskWireShape(task, `tasks/list task ${index}`);
+    });
     console.log(`Tasks listed: ${listTasksResult.tasks.length}`);
 
     // Call delayed_echo using callToolStream
@@ -235,12 +545,16 @@ async function main() {
     );
 
     let taskRawResult;
+    let createdTaskId: string | undefined;
     for await (const message of stream) {
       switch (message.type) {
         case 'taskCreated':
+          assertTaskWireShape(message.task, 'taskCreated message task');
+          createdTaskId = message.task.taskId;
           console.log(`Task created: ${message.task.taskId}`);
           break;
         case 'taskStatus':
+          assertTaskWireShape(message.task, 'taskStatus message task');
           console.log(
             `Task status: ${message.task.status} (${message.task.statusMessage})`
           );
@@ -256,6 +570,10 @@ async function main() {
     if (!taskRawResult) {
       throw new Error('Did not receive a result from callToolStream');
     }
+    if (!createdTaskId) {
+      throw new Error('Did not receive a taskCreated message');
+    }
+    assertRelatedTaskMeta(taskRawResult, createdTaskId, 'tasks/result result');
 
     // @ts-expect-error - content is a union type, text property not guaranteed
     const resultText = taskRawResult.content?.[0]?.text;
@@ -281,6 +599,9 @@ async function main() {
     const roots = JSON.parse(rootsText);
     if (!Array.isArray(roots) || roots.length !== 2) {
       throw new Error(`get_roots failed. Expected 2 roots, got: ${rootsText}`);
+    }
+    if (roots[0]?._meta?.source !== 'ts-client') {
+      throw new Error(`get_roots did not preserve Root._meta: ${rootsText}`);
     }
     console.log('get_roots passed!');
 

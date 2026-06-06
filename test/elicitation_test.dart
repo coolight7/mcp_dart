@@ -181,8 +181,9 @@ void main() {
         expect(params.message, equals("Enter your name"));
 
         final schema = params.requestedSchema!;
-        expect(schema, isA<JsonString>());
-        final stringSchema = schema as JsonString;
+        expect(schema, isA<JsonObject>());
+        final objectSchema = schema as JsonObject;
+        final stringSchema = objectSchema.properties!['name'] as JsonString;
 
         expect(stringSchema.minLength, equals(1));
 
@@ -199,7 +200,10 @@ void main() {
         id: 1,
         elicitParams: ElicitRequestParams(
           message: "Enter your name",
-          requestedSchema: JsonSchema.string(minLength: 1),
+          requestedSchema: JsonObject(
+            properties: {'name': JsonSchema.string(minLength: 1)},
+            required: const ['name'],
+          ),
         ),
       );
 
@@ -238,7 +242,9 @@ void main() {
         expect(params.message, equals("Confirm action"));
 
         final schema = params.requestedSchema!;
-        expect(schema, isA<JsonBoolean>());
+        expect(schema, isA<JsonObject>());
+        final objectSchema = schema as JsonObject;
+        expect(objectSchema.properties!['confirmed'], isA<JsonBoolean>());
 
         return const ElicitResult(
           action: 'accept',
@@ -252,7 +258,12 @@ void main() {
         id: 2,
         elicitParams: ElicitRequestParams(
           message: "Confirm action",
-          requestedSchema: JsonSchema.boolean(defaultValue: false),
+          requestedSchema: JsonObject(
+            properties: {
+              'confirmed': JsonSchema.boolean(defaultValue: false),
+            },
+            required: const ['confirmed'],
+          ),
         ),
       );
 
@@ -286,8 +297,9 @@ void main() {
         expect(params.message, equals("Enter age"));
 
         final schema = params.requestedSchema!;
-        expect(schema, isA<JsonNumber>());
-        final numberSchema = schema as JsonNumber;
+        expect(schema, isA<JsonObject>());
+        final objectSchema = schema as JsonObject;
+        final numberSchema = objectSchema.properties!['age'] as JsonNumber;
 
         expect(numberSchema.minimum, equals(0));
         expect(numberSchema.maximum, equals(120));
@@ -304,7 +316,12 @@ void main() {
         id: 3,
         elicitParams: ElicitRequestParams(
           message: "Enter age",
-          requestedSchema: JsonSchema.number(minimum: 0, maximum: 120),
+          requestedSchema: JsonObject(
+            properties: {
+              'age': JsonSchema.number(minimum: 0, maximum: 120),
+            },
+            required: const ['age'],
+          ),
         ),
       );
 
@@ -338,8 +355,9 @@ void main() {
         expect(params.message, equals("Choose size"));
 
         final schema = params.requestedSchema!;
-        expect(schema, isA<JsonString>());
-        final stringSchema = schema as JsonString;
+        expect(schema, isA<JsonObject>());
+        final objectSchema = schema as JsonObject;
+        final stringSchema = objectSchema.properties!['size'] as JsonString;
         expect(stringSchema.enumValues, equals(['small', 'medium', 'large']));
 
         return const ElicitResult(
@@ -354,9 +372,14 @@ void main() {
         id: 4,
         elicitParams: ElicitRequestParams(
           message: "Choose size",
-          requestedSchema: JsonSchema.string(
-            enumValues: ['small', 'medium', 'large'],
-            defaultValue: 'medium',
+          requestedSchema: JsonObject(
+            properties: {
+              'size': JsonSchema.string(
+                enumValues: ['small', 'medium', 'large'],
+                defaultValue: 'medium',
+              ),
+            },
+            required: const ['size'],
           ),
         ),
       );
@@ -398,7 +421,10 @@ void main() {
         id: 5,
         elicitParams: ElicitRequestParams(
           message: "Enter name",
-          requestedSchema: JsonSchema.string(minLength: 1),
+          requestedSchema: JsonObject(
+            properties: {'name': JsonSchema.string(minLength: 1)},
+            required: const ['name'],
+          ),
         ),
       );
 
@@ -433,6 +459,145 @@ void main() {
       // This should succeed - the handler field can be set
       // but the internal request handler won't be registered
       expect(client.onElicitRequest, isNotNull);
+    });
+
+    test('Client with URL-only capability handles URL elicitation', () async {
+      final transport = MockTransport();
+      transport.mockInitializeResponse = const InitializeResult(
+        protocolVersion: latestProtocolVersion,
+        capabilities: ServerCapabilities(),
+        serverInfo: Implementation(name: 'test-server', version: '1.0.0'),
+      );
+
+      final client = Client(
+        const Implementation(name: 'test-client', version: '1.0.0'),
+        options: const ClientOptions(
+          capabilities: ClientCapabilities(
+            elicitation: ClientElicitation.urlOnly(),
+          ),
+        ),
+      );
+
+      ElicitRequest? receivedParams;
+      client.onElicitRequest = (params) async {
+        receivedParams = params;
+        return const ElicitResult(action: 'accept');
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.onmessage?.call(
+        JsonRpcElicitRequest(
+          id: 7,
+          elicitParams: const ElicitRequest.url(
+            message: 'Please authenticate',
+            url: 'https://oauth.example.com/authorize',
+            elicitationId: 'oauth-123',
+          ),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(receivedParams, isNotNull);
+      expect(receivedParams!.isUrlMode, isTrue);
+      expect(transport.sentMessages.single, isA<JsonRpcResponse>());
+      final response = transport.sentMessages.single as JsonRpcResponse;
+      expect(response.id, 7);
+      expect(response.result, equals({'action': 'accept'}));
+
+      await client.close();
+    });
+
+    test('Client rejects unsupported elicitation mode', () async {
+      final transport = MockTransport();
+      transport.mockInitializeResponse = const InitializeResult(
+        protocolVersion: latestProtocolVersion,
+        capabilities: ServerCapabilities(),
+        serverInfo: Implementation(name: 'test-server', version: '1.0.0'),
+      );
+
+      final client = Client(
+        const Implementation(name: 'test-client', version: '1.0.0'),
+        options: const ClientOptions(
+          capabilities: ClientCapabilities(
+            elicitation: ClientElicitation.formOnly(),
+          ),
+        ),
+      );
+      client.onElicitRequest = (params) async {
+        return const ElicitResult(action: 'accept');
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.onmessage?.call(
+        JsonRpcElicitRequest(
+          id: 8,
+          elicitParams: const ElicitRequest.url(
+            message: 'Please authenticate',
+            url: 'https://oauth.example.com/authorize',
+            elicitationId: 'oauth-123',
+          ),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(transport.sentMessages.single, isA<JsonRpcError>());
+      final error = transport.sentMessages.single as JsonRpcError;
+      expect(error.id, 8);
+      expect(error.error.code, ErrorCode.invalidParams.value);
+      expect(error.error.message, contains('URL elicitation'));
+
+      await client.close();
+    });
+
+    test('Client rejects form elicitation when only URL is advertised',
+        () async {
+      final transport = MockTransport();
+      transport.mockInitializeResponse = const InitializeResult(
+        protocolVersion: latestProtocolVersion,
+        capabilities: ServerCapabilities(),
+        serverInfo: Implementation(name: 'test-server', version: '1.0.0'),
+      );
+
+      final client = Client(
+        const Implementation(name: 'test-client', version: '1.0.0'),
+        options: const ClientOptions(
+          capabilities: ClientCapabilities(
+            elicitation: ClientElicitation.urlOnly(),
+          ),
+        ),
+      );
+      client.onElicitRequest = (params) async {
+        return const ElicitResult(action: 'accept');
+      };
+
+      await client.connect(transport);
+      transport.clearSentMessages();
+
+      transport.onmessage?.call(
+        JsonRpcElicitRequest(
+          id: 9,
+          elicitParams: ElicitRequest.form(
+            message: 'Enter your name',
+            requestedSchema: JsonObject(
+              properties: {'name': JsonSchema.string()},
+              required: const ['name'],
+            ),
+          ),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(transport.sentMessages.single, isA<JsonRpcError>());
+      final error = transport.sentMessages.single as JsonRpcError;
+      expect(error.id, 9);
+      expect(error.error.code, ErrorCode.invalidParams.value);
+      expect(error.error.message, contains('form elicitation'));
+
+      await client.close();
     });
   });
 
@@ -535,7 +700,10 @@ void main() {
     test('ElicitRequestParams form mode', () {
       final params = ElicitRequestParams.form(
         message: 'Enter your name',
-        requestedSchema: JsonSchema.string(minLength: 1),
+        requestedSchema: JsonObject(
+          properties: {'name': JsonSchema.string(minLength: 1)},
+          required: const ['name'],
+        ),
       );
 
       expect(params.isFormMode, isTrue);
@@ -544,6 +712,59 @@ void main() {
       expect(params.requestedSchema, isNotNull);
       expect(params.url, isNull);
       expect(params.elicitationId, isNull);
+    });
+
+    test('ElicitRequestParams rejects invalid form and URL variants', () {
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'mode': 'oauth',
+          'message': 'Please authenticate',
+          'requestedSchema': {
+            'type': 'object',
+            'properties': {
+              'name': {'type': 'string'},
+            },
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'message': 'Enter your name',
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'mode': 'url',
+          'message': 'Please authenticate',
+          'url': 'https://oauth.example.com/authorize',
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'mode': 'url',
+          'message': 'Please authenticate',
+          'url': 'https://oauth.example.com/authorize',
+          'elicitationId': 'oauth-123',
+          'requestedSchema': {
+            'type': 'object',
+            'properties': {
+              'name': {'type': 'string'},
+            },
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams(
+          message: 'Please authenticate',
+          requestedSchema: const JsonObject(properties: {}),
+          url: 'https://oauth.example.com/authorize',
+        ),
+        throwsA(isA<AssertionError>()),
+      );
     });
 
     test('JsonRpcElicitationCompleteNotification serialization', () {
@@ -563,6 +784,303 @@ void main() {
 
     test('URLElicitationRequiredError code', () {
       expect(ErrorCode.urlElicitationRequired.value, equals(-32042));
+    });
+
+    test('Form elicitation accepts spec primitive schema variants', () {
+      final request = ElicitRequestParams.fromJson({
+        'mode': 'form',
+        'message': 'Configure deployment',
+        'requestedSchema': {
+          'type': 'object',
+          'properties': {
+            'email': {
+              'type': 'string',
+              'format': 'email',
+              'title': 'Email',
+              'description': 'Contact address',
+              'default': 'ops@example.com',
+            },
+            'size': {
+              'type': 'string',
+              'oneOf': [
+                {'const': 'small', 'title': 'Small'},
+                {'const': 'large', 'title': 'Large'},
+              ],
+            },
+            'region': {
+              'type': 'string',
+              'enum': ['iad', 'sfo'],
+              'enumNames': ['Virginia', 'California'],
+            },
+            'replicas': {
+              'type': 'integer',
+              'minimum': 1,
+              'maximum': 10,
+              'default': 2,
+            },
+            'ratio': {
+              'type': 'number',
+              'minimum': 0,
+              'maximum': 1,
+            },
+            'confirmed': {
+              'type': 'boolean',
+              'default': false,
+            },
+            'features': {
+              'type': 'array',
+              'items': {
+                'type': 'string',
+                'enum': ['logs', 'metrics'],
+              },
+            },
+            'permissions': {
+              'type': 'array',
+              'items': {
+                'anyOf': [
+                  {'const': 'read', 'title': 'Read'},
+                  {'const': 'write', 'title': 'Write'},
+                ],
+              },
+            },
+          },
+          'required': ['email', 'region'],
+        },
+      });
+
+      expect(request.isFormMode, isTrue);
+      expect(request.toJson()['requestedSchema'], isA<Map<String, dynamic>>());
+    });
+
+    test('Form elicitation rejects non-spec schema shapes', () {
+      Map<String, dynamic> requestWithProperty(
+        String name,
+        Object? property, {
+        Object? required = const <String>['value'],
+      }) =>
+          {
+            'message': 'Invalid schema',
+            'requestedSchema': {
+              'type': 'object',
+              'properties': {name: property},
+              if (required != null) 'required': required,
+            },
+          };
+
+      expect(
+        () => ElicitRequestParams.form(
+          message: 'Bad root',
+          requestedSchema: JsonSchema.string(),
+        ).toJson(),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'message': 'Missing properties',
+          'requestedSchema': {'type': 'object'},
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', 'not-a-schema'),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson({
+          'message': 'Bad required',
+          'requestedSchema': {
+            'type': 'object',
+            'properties': {
+              'value': {'type': 'string'},
+            },
+            'required': ['value', 1],
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'object',
+            'properties': {},
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'string',
+            'pattern': '^x',
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'string',
+            'format': 'uuid',
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'string',
+            'enum': ['ok', 1],
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'string',
+            'enumNames': ['Ok', 1],
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'string',
+            'oneOf': [
+              {'const': 'ok'},
+            ],
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'array',
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'array',
+            'items': {
+              'type': 'string',
+              'enum': ['ok', 1],
+            },
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitRequestParams.fromJson(
+          requestWithProperty('value', {
+            'type': 'array',
+            'items': {
+              'anyOf': [
+                {'const': 'ok'},
+              ],
+            },
+          }),
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('ElicitResult validates accepted content wire values', () {
+      final parsed = ElicitResult.fromJson({
+        'action': 'accept',
+        'content': {
+          'text': 'value',
+          'count': 3,
+          'confirmed': true,
+          'selections': ['a', 'b'],
+        },
+        '_meta': {'trace': 'abc'},
+      });
+
+      expect(parsed.toJson()['content'], containsPair('count', 3));
+      expect(parsed.toJson()['_meta'], containsPair('trace', 'abc'));
+
+      expect(
+        () => ElicitResult.fromJson({
+          'action': 'accept',
+          'content': ['not', 'an', 'object'],
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => ElicitResult.fromJson({
+          'action': 'accept',
+          'content': {
+            'nested': {'value': true},
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => const ElicitResult(
+          action: 'accept',
+          content: {
+            'values': [1, 2],
+          },
+        ).toJson(),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('URLElicitationRequiredErrorData validates URL-only entries', () {
+      final data = URLElicitationRequiredErrorData.fromJson({
+        'elicitations': [
+          {
+            'mode': 'url',
+            'message': 'Authenticate',
+            'url': 'https://oauth.example.com/authorize',
+            'elicitationId': 'oauth-123',
+          },
+        ],
+      });
+
+      expect(data.elicitations.single.isUrlMode, isTrue);
+      expect(data.toJson()['elicitations'], hasLength(1));
+
+      expect(
+        () => URLElicitationRequiredErrorData.fromJson({}),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => URLElicitationRequiredErrorData.fromJson({
+          'elicitations': [
+            {
+              'message': 'Enter value',
+              'requestedSchema': {
+                'type': 'object',
+                'properties': {
+                  'value': {'type': 'string'},
+                },
+              },
+            },
+          ],
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => URLElicitationRequiredErrorData(
+          elicitations: [
+            ElicitRequestParams.form(
+              message: 'Enter value',
+              requestedSchema: JsonObject(
+                properties: {'value': JsonSchema.string()},
+              ),
+            ),
+          ],
+        ).toJson(),
+        throwsA(isA<ArgumentError>()),
+      );
     });
 
     // Note: enumNames is not standard JSON Schema 2020-12, usually handled via oneOf with const/title

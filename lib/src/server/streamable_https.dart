@@ -22,13 +22,21 @@ abstract class EventStore {
   /// [streamId] ID of the stream the event belongs to
   /// [message] The JSON-RPC message to store
   ///
-  /// Returns the generated event ID for the stored event
+  /// Returns the generated event ID for the stored event. Event IDs are written
+  /// to SSE `id:` fields and later sent by clients in the `Last-Event-ID` HTTP
+  /// header, so implementations must return non-empty visible ASCII without
+  /// spaces or control characters.
   Future<EventId> storeEvent(StreamId streamId, JsonRpcMessage message);
 
-  /// Replays events after a specified event ID
+  /// Replays events after a specified event ID.
+  ///
+  /// Implementations must replay only events from the stream that originally
+  /// produced [lastEventId]. Events from other streams must not be replayed.
   ///
   /// [lastEventId] The last event ID received by the client
-  /// [send] Callback function that will be called for each event
+  /// [send] Callback function that will be called for each event. Replayed
+  /// event IDs must follow the same SSE/header-safe requirements as IDs
+  /// returned by [storeEvent].
   ///
   /// Returns the stream ID associated with the events
   Future<StreamId> replayEventsAfter(
@@ -41,9 +49,14 @@ abstract class EventStore {
 /// Configuration options for StreamableHTTPServerTransport
 class StreamableHTTPServerTransportOptions {
   /// Function that generates a session ID for the transport.
-  /// The session ID SHOULD be globally unique and cryptographically secure (e.g., a securely generated UUID, a JWT, or a cryptographic hash)
+  /// The session ID SHOULD be globally unique and cryptographically secure
+  /// (e.g., a securely generated UUID, a JWT, or a cryptographic hash).
   ///
-  /// Return null to disable session management
+  /// Generated IDs are sent in the `MCP-Session-Id` HTTP response header and
+  /// therefore must be non-empty visible ASCII without spaces or control
+  /// characters.
+  ///
+  /// Return null to disable session management.
   final String? Function()? sessionIdGenerator;
 
   /// A callback for session initialization events
@@ -80,6 +93,11 @@ class StreamableHTTPServerTransportOptions {
   /// Set to false for backward-compatibility behavior.
   final bool rejectBatchJsonRpcPayloads;
 
+  /// The maximum number of events allowed during SSE resumption.
+  /// Used to protect against out-of-memory errors from overly large replays.
+  /// Default is 1000.
+  final int maxReplayedEvents;
+
   /// Creates configuration options for StreamableHTTPServerTransport
   StreamableHTTPServerTransportOptions({
     this.sessionIdGenerator,
@@ -91,6 +109,7 @@ class StreamableHTTPServerTransportOptions {
     this.allowedOrigins,
     this.strictProtocolVersionHeaderValidation = true,
     this.rejectBatchJsonRpcPayloads = true,
+    this.maxReplayedEvents = 1000,
   });
 }
 
@@ -133,16 +152,22 @@ class StreamableHTTPServerTransportOptions {
 /// In stateless mode:
 /// - Session ID is only included in initialization responses
 /// - No session validation is performed
-class StreamableHTTPServerTransport implements Transport {
+class StreamableHTTPServerTransport
+    implements Transport, RequestIdAwareTransport {
   // when sessionId is not set (null), it means the transport is in stateless mode
   final String? Function()? _sessionIdGenerator;
   bool _started = false;
   final Map<String, HttpResponse> _streamMapping = {};
+  final Set<StreamId> _standaloneSseStreamIds = {};
+  final Map<StreamId, Set<HttpResponse>> _standaloneSseResponses = {};
+  final Set<StreamId> _ownedStreamIds = {};
   final Map<dynamic, String> _requestToStreamMapping = {};
   final Map<dynamic, JsonRpcMessage> _requestResponseMap = {};
   bool _initialized = false;
+  bool _terminated = false;
   final bool _enableJsonResponse;
-  final String _standaloneSseStreamId = '_GET_stream';
+  final String _standaloneSseStreamIdPrefix = '_GET_stream:';
+  final String _legacyStandaloneSseStreamId = '_GET_stream';
   final EventStore? _eventStore;
   final void Function(String sessionId)? _onsessioninitialized;
   final bool _enableDnsRebindingProtection;
@@ -150,6 +175,9 @@ class StreamableHTTPServerTransport implements Transport {
   final Set<String>? _allowedOrigins;
   final bool _strictProtocolVersionHeaderValidation;
   final bool _rejectBatchJsonRpcPayloads;
+  final int _maxReplayedEvents;
+  static const JsonRpcNotification _ssePrimingMessage =
+      JsonRpcNotification(method: 'notifications/experimental/sse/priming');
 
   @override
   String? sessionId;
@@ -175,7 +203,8 @@ class StreamableHTTPServerTransport implements Transport {
         _allowedOrigins = options.allowedOrigins,
         _strictProtocolVersionHeaderValidation =
             options.strictProtocolVersionHeaderValidation,
-        _rejectBatchJsonRpcPayloads = options.rejectBatchJsonRpcPayloads;
+        _rejectBatchJsonRpcPayloads = options.rejectBatchJsonRpcPayloads,
+        _maxReplayedEvents = options.maxReplayedEvents;
 
   /// Starts the transport. This is required by the Transport interface but is a no-op
   /// for the Streamable HTTP transport as connections are managed per-request.
@@ -249,6 +278,27 @@ class StreamableHTTPServerTransport implements Transport {
     return false;
   }
 
+  bool _isValidVisibleAsciiToken(String value) {
+    if (value.isEmpty) {
+      return false;
+    }
+
+    return value.codeUnits.every((unit) => unit >= 0x21 && unit <= 0x7E);
+  }
+
+  bool _isValidSessionId(String sessionId) {
+    return _isValidVisibleAsciiToken(sessionId);
+  }
+
+  void _validateSseEventId(EventId eventId) {
+    if (!_isValidVisibleAsciiToken(eventId)) {
+      throw StateError(
+        'Invalid SSE event ID generated by EventStore: event IDs must be '
+        'non-empty visible ASCII without spaces or control characters',
+      );
+    }
+  }
+
   Future<void> _writeJsonRpcErrorResponse(
     HttpResponse response, {
     required int httpStatus,
@@ -270,6 +320,55 @@ class StreamableHTTPServerTransport implements Transport {
       ),
     );
     await _safeClose(response);
+  }
+
+  bool _isStandaloneSseStreamId(StreamId streamId) {
+    return streamId == _legacyStandaloneSseStreamId ||
+        streamId.startsWith(_standaloneSseStreamIdPrefix);
+  }
+
+  void _addStandaloneSseResponse(StreamId streamId, HttpResponse response) {
+    _ownedStreamIds.add(streamId);
+    _standaloneSseStreamIds.add(streamId);
+    _standaloneSseResponses.putIfAbsent(streamId, () => {}).add(response);
+    _streamMapping.putIfAbsent(streamId, () => response);
+  }
+
+  MapEntry<StreamId, HttpResponse>? _selectStandaloneSseTarget() {
+    for (final streamId
+        in List<StreamId>.from(_standaloneSseStreamIds).reversed) {
+      final responses = _standaloneSseResponses[streamId];
+      if (responses == null || responses.isEmpty) {
+        _standaloneSseStreamIds.remove(streamId);
+        _streamMapping.remove(streamId);
+        continue;
+      }
+
+      return MapEntry(streamId, responses.last);
+    }
+
+    return null;
+  }
+
+  void _removeStandaloneSseResponse(
+    StreamId streamId,
+    HttpResponse response,
+  ) {
+    final responses = _standaloneSseResponses[streamId];
+    responses?.remove(response);
+
+    if (responses == null || responses.isEmpty) {
+      _standaloneSseResponses.remove(streamId);
+      _standaloneSseStreamIds.remove(streamId);
+      if (identical(_streamMapping[streamId], response)) {
+        _streamMapping.remove(streamId);
+      }
+      return;
+    }
+
+    if (identical(_streamMapping[streamId], response)) {
+      _streamMapping[streamId] = responses.first;
+    }
   }
 
   Set<String> _parseAcceptedMediaTypes(HttpRequest req) {
@@ -344,26 +443,6 @@ class StreamableHTTPServerTransport implements Transport {
       headers["mcp-session-id"] = sessionId!;
     }
 
-    // Check if there's already an active standalone SSE stream for this session
-    if (_streamMapping[_standaloneSseStreamId] != null) {
-      // Only one GET SSE stream is allowed per session
-      req.response
-        ..statusCode = HttpStatus.conflict
-        ..write(
-          jsonEncode(
-            JsonRpcError(
-              id: null,
-              error: JsonRpcErrorData(
-                code: ErrorCode.connectionClosed.value,
-                message: 'Conflict: Only one SSE stream is allowed per session',
-              ),
-            ).toJson(),
-          ),
-        );
-      await _safeClose(req.response);
-      return;
-    }
-
     // We need to send headers immediately as messages will arrive much later,
     // otherwise the client will just wait for the first message
     req.response.statusCode = HttpStatus.ok;
@@ -371,15 +450,22 @@ class StreamableHTTPServerTransport implements Transport {
       req.response.headers.set(key, value);
     });
 
+    final streamId = '$_standaloneSseStreamIdPrefix${generateUUID()}';
+
     // Assign the response to the standalone SSE stream before flushing
     // to ensure it's available if a task tries to send a message immediately
-    _streamMapping[_standaloneSseStreamId] = req.response;
+    _addStandaloneSseResponse(streamId, req.response);
 
-    await req.response.flush();
+    if (!await _primeSseStream(streamId, req.response)) {
+      _removeStandaloneSseResponse(streamId, req.response);
+      _ownedStreamIds.remove(streamId);
+      await _safeClose(req.response);
+      return;
+    }
 
     // Set up close handler for client disconnects
     req.response.done.then((_) {
-      _streamMapping.remove(_standaloneSseStreamId);
+      _removeStandaloneSseResponse(streamId, req.response);
     });
   }
 
@@ -389,7 +475,33 @@ class StreamableHTTPServerTransport implements Transport {
     if (_eventStore == null) {
       return;
     }
+
     try {
+      final maxEvents = _maxReplayedEvents;
+      final replayedEvents = <({EventId eventId, JsonRpcMessage message})>[];
+      final streamId = await _eventStore!.replayEventsAfter(
+        lastEventId,
+        send: (eventId, message) async {
+          _validateSseEventId(eventId);
+          if (replayedEvents.length >= maxEvents) {
+            throw StateError(
+              'Event replay limit exceeded: maximum of $maxEvents events can be replayed',
+            );
+          }
+          replayedEvents.add((eventId: eventId, message: message));
+        },
+      );
+
+      if (!_ownedStreamIds.contains(streamId)) {
+        await _writeJsonRpcErrorResponse(
+          res,
+          httpStatus: HttpStatus.notFound,
+          errorCode: ErrorCode.connectionClosed,
+          message: 'Event ID not found',
+        );
+        return;
+      }
+
       final headers = {
         HttpHeaders.contentTypeHeader: "text/event-stream; charset=utf-8",
         HttpHeaders.cacheControlHeader: "no-cache, no-transform",
@@ -406,27 +518,58 @@ class StreamableHTTPServerTransport implements Transport {
       });
       await res.flush();
 
-      final streamId = await _eventStore!.replayEventsAfter(
-        lastEventId,
-        send: (eventId, message) async {
-          if (!await _writeSSEEvent(res, message, eventId)) {
-            onerror?.call(StateError("Failed to replay events"));
-            await _safeClose(res);
-          }
-          return Future.value();
-        },
-      );
+      for (final event in replayedEvents) {
+        if (!await _writeSSEEvent(res, event.message, event.eventId)) {
+          onerror?.call(StateError("Failed to replay events"));
+          await _safeClose(res);
+          return;
+        }
+      }
 
-      _streamMapping[streamId] = res;
+      if (!await _primeSseStream(streamId, res)) {
+        await _safeClose(res);
+        return;
+      }
+
+      if (_isStandaloneSseStreamId(streamId)) {
+        _addStandaloneSseResponse(streamId, res);
+      } else {
+        _streamMapping[streamId] = res;
+      }
+      res.done.then((_) {
+        if (_isStandaloneSseStreamId(streamId)) {
+          _removeStandaloneSseResponse(streamId, res);
+        } else if (identical(_streamMapping[streamId], res)) {
+          _streamMapping.remove(streamId);
+        }
+      });
     } catch (error) {
       onerror?.call(error is Error ? error : StateError(error.toString()));
+      final errorStr = error.toString().toLowerCase();
+      final isNotFound =
+          errorStr.contains('not found') || errorStr.contains('unknown');
+      final isLimitExceeded = errorStr.contains('replay limit exceeded');
+      await _writeJsonRpcErrorResponse(
+        res,
+        httpStatus: isLimitExceeded
+            ? 413
+            : (isNotFound
+                ? HttpStatus.notFound
+                : HttpStatus.internalServerError),
+        errorCode: ErrorCode.connectionClosed,
+        message: isLimitExceeded
+            ? 'Event replay limit exceeded'
+            : (isNotFound
+                ? 'Event ID not found'
+                : 'Internal server error during replay: $error'),
+      );
     }
   }
 
   /// Safely closes an HTTP response, ignoring errors if client disconnected
   Future<void> _safeClose(HttpResponse res) async {
     try {
-      await res.close();
+      await res.close().timeout(const Duration(milliseconds: 100));
     } catch (e) {
       // Ignore close errors - client may have already disconnected
     }
@@ -438,19 +581,59 @@ class StreamableHTTPServerTransport implements Transport {
     JsonRpcMessage message, [
     String? eventId,
   ]) async {
-    var eventData = "event: message\n";
-    // Include event ID if provided - this is important for resumability
-    if (eventId != null) {
-      eventData += "id: $eventId\n";
-    }
-    eventData += "data: ${jsonEncode(message.toJson())}\n\n";
-
     try {
+      var eventData = "event: message\n";
+      // Include event ID if provided - this is important for resumability
+      if (eventId != null) {
+        _validateSseEventId(eventId);
+        eventData += "id: $eventId\n";
+      }
+      eventData += "data: ${jsonEncode(message.toJson())}\n\n";
+
       res.add(utf8.encode(eventData));
       await res.flush();
       return true;
     } catch (e) {
       print(e);
+      return false;
+    }
+  }
+
+  Future<bool> _writeSSEPrimingEvent(
+    HttpResponse res,
+    EventId eventId,
+  ) async {
+    try {
+      _validateSseEventId(eventId);
+      res.add(utf8.encode('id: $eventId\ndata:\n\n'));
+      await res.flush();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  Future<bool> _primeSseStream(StreamId streamId, HttpResponse res) async {
+    try {
+      final store = _eventStore;
+      if (store == null) {
+        await res.flush();
+        return true;
+      }
+
+      final eventId = await store.storeEvent(streamId, _ssePrimingMessage);
+      _validateSseEventId(eventId);
+      final sent = await _writeSSEPrimingEvent(res, eventId);
+      if (!sent) {
+        onerror?.call(StateError('Failed to send initial SSE event ID'));
+      }
+      return sent;
+    } catch (error) {
+      if (error is Error) {
+        onerror?.call(error);
+      } else {
+        onerror?.call(StateError(error.toString()));
+      }
       return false;
     }
   }
@@ -598,9 +781,23 @@ class StreamableHTTPServerTransport implements Transport {
       // https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/
       final isInitializationRequest = messages.any(_isInitializeRequest);
       if (isInitializationRequest) {
+        final requestSessionId = req.headers.value('mcp-session-id');
+
         // If it's a server with session management and the session ID is already set we should reject the request
-        // to avoid re-initialization.
+        // to avoid re-initialization. A mismatched or terminated session ID means the client referenced a session
+        // this transport cannot serve, so return the Streamable HTTP stale-session 404.
         if (_initialized && sessionId != null) {
+          if (_terminated ||
+              requestSessionId != null && requestSessionId != sessionId) {
+            await _writeJsonRpcErrorResponse(
+              req.response,
+              httpStatus: HttpStatus.notFound,
+              errorCode: ErrorCode.connectionClosed,
+              message: 'Session not found',
+            );
+            return;
+          }
+
           req.response.statusCode = HttpStatus.badRequest;
           req.response.write(
             jsonEncode(
@@ -633,7 +830,32 @@ class StreamableHTTPServerTransport implements Transport {
           await _safeClose(req.response);
           return;
         }
-        sessionId = _sessionIdGenerator?.call();
+
+        final generatedSessionId = _sessionIdGenerator?.call();
+        if (generatedSessionId != null &&
+            !_isValidSessionId(generatedSessionId)) {
+          await _writeJsonRpcErrorResponse(
+            req.response,
+            httpStatus: HttpStatus.internalServerError,
+            errorCode: ErrorCode.internalError,
+            message: 'Invalid session ID generated by server',
+          );
+          return;
+        }
+
+        if (requestSessionId != null &&
+            generatedSessionId != null &&
+            requestSessionId != generatedSessionId) {
+          await _writeJsonRpcErrorResponse(
+            req.response,
+            httpStatus: HttpStatus.notFound,
+            errorCode: ErrorCode.connectionClosed,
+            message: 'Session not found',
+          );
+          return;
+        }
+
+        sessionId = generatedSessionId;
         _initialized = true;
 
         // If we have a session ID and an onsessioninitialized handler, call it immediately
@@ -695,9 +917,25 @@ class StreamableHTTPServerTransport implements Transport {
         for (final message in messages) {
           if (_isJsonRpcRequest(message)) {
             final reqId = (message as JsonRpcRequest).id;
+            _ownedStreamIds.add(streamId);
             _streamMapping[streamId] = req.response;
             _requestToStreamMapping[reqId] = streamId;
           }
+        }
+
+        if (!_enableJsonResponse &&
+            !await _primeSseStream(streamId, req.response)) {
+          _streamMapping.remove(streamId);
+          _ownedStreamIds.remove(streamId);
+          for (final message in messages) {
+            if (_isJsonRpcRequest(message)) {
+              final reqId = (message as JsonRpcRequest).id;
+              _requestToStreamMapping.remove(reqId);
+              _requestResponseMap.remove(reqId);
+            }
+          }
+          await _safeClose(req.response);
+          return;
         }
 
         // Set up close handler for client disconnects
@@ -804,8 +1042,8 @@ class StreamableHTTPServerTransport implements Transport {
       );
       await _safeClose(res);
       return false;
-    } else if (requestSessionId != sessionId) {
-      // Reject requests with invalid session ID with 404 Not Found
+    } else if (_terminated || requestSessionId != sessionId) {
+      // Reject terminated or invalid session IDs with 404 Not Found.
       res.statusCode = HttpStatus.notFound;
       res.write(
         jsonEncode(
@@ -827,12 +1065,24 @@ class StreamableHTTPServerTransport implements Transport {
 
   @override
   Future<void> close() async {
-    // Close all SSE connections - fix concurrent modification by creating a copy of the values first
-    final responses = List<HttpResponse>.from(_streamMapping.values);
+    if (sessionId != null) {
+      _terminated = true;
+    }
+
+    // Close all SSE connections, including multiple standalone responses that
+    // may share one replay stream identity.
+    final responses = <HttpResponse>{
+      ..._streamMapping.values,
+      for (final streamResponses in _standaloneSseResponses.values)
+        ...streamResponses,
+    };
     for (final response in responses) {
       await _safeClose(response);
     }
     _streamMapping.clear();
+    _standaloneSseStreamIds.clear();
+    _standaloneSseResponses.clear();
+    _ownedStreamIds.clear();
 
     // Clear any pending responses
     _requestResponseMap.clear();
@@ -841,7 +1091,15 @@ class StreamableHTTPServerTransport implements Transport {
   }
 
   @override
-  Future<void> send(JsonRpcMessage message, {dynamic relatedRequestId}) async {
+  Future<void> send(JsonRpcMessage message, {dynamic relatedRequestId}) {
+    return sendWithRequestId(message, relatedRequestId: relatedRequestId);
+  }
+
+  @override
+  Future<void> sendWithRequestId(
+    JsonRpcMessage message, {
+    RequestId? relatedRequestId,
+  }) async {
     dynamic requestId = relatedRequestId;
     if (_isJsonRpcResponse(message) || _isJsonRpcError(message)) {
       // If the message is a response, use the request ID from the message
@@ -859,25 +1117,30 @@ class StreamableHTTPServerTransport implements Transport {
         );
       }
 
-      final standaloneSse = _streamMapping[_standaloneSseStreamId];
-      if (standaloneSse == null) {
+      if (_standaloneSseStreamIds.isEmpty) {
         // The spec says the server MAY send messages on the stream, so it's ok to discard if no stream
         return;
       }
 
-      // Generate and store event ID if event store is provided
-      String? eventId;
-      if (_eventStore != null) {
-        // Stores the event and gets the generated event ID
-        eventId = await _eventStore!.storeEvent(
-          _standaloneSseStreamId,
-          message,
-        );
-      }
+      while (true) {
+        final target = _selectStandaloneSseTarget();
+        if (target == null) {
+          return;
+        }
 
-      // Send the message to the standalone SSE stream
-      await _writeSSEEvent(standaloneSse, message, eventId);
-      return;
+        // Generate and store a stream-specific event ID if event store is provided.
+        String? eventId;
+        if (_eventStore != null) {
+          eventId = await _eventStore!.storeEvent(target.key, message);
+        }
+
+        final sent = await _writeSSEEvent(target.value, message, eventId);
+        if (sent) {
+          return;
+        }
+
+        _removeStandaloneSseResponse(target.key, target.value);
+      }
     }
 
     // Get the response for this request

@@ -73,15 +73,93 @@ void main() {
     });
   });
 
+  group('Result Meta Tests', () {
+    const Map<String, dynamic> meta = {'traceId': 'abc'};
+
+    void expectMeta(BaseResultData result) {
+      expect(result.toJson()['_meta'], equals(meta));
+      final response = JsonRpcResponse(
+        id: 1,
+        result: result.toJson(),
+        meta: result.meta,
+      );
+      expect(response.toJson()['result']['_meta'], equals(meta));
+    }
+
+    test('typed result serializers preserve _meta', () {
+      const task = Task(
+        taskId: 'task-1',
+        status: TaskStatus.completed,
+        ttl: null,
+        createdAt: '2026-05-25T00:00:00.000Z',
+        lastUpdatedAt: '2026-05-25T00:00:01.000Z',
+        meta: meta,
+      );
+
+      for (final result in <BaseResultData>[
+        const EmptyResult(meta: meta),
+        const InitializeResult(
+          protocolVersion: latestProtocolVersion,
+          capabilities: ServerCapabilities(),
+          serverInfo: Implementation(name: 'server', version: '1.0'),
+          meta: meta,
+        ),
+        const ListRootsResult(roots: [], meta: meta),
+        const ListResourcesResult(resources: [], meta: meta),
+        const ListResourceTemplatesResult(resourceTemplates: [], meta: meta),
+        const ReadResourceResult(contents: [], meta: meta),
+        const ListPromptsResult(prompts: [], meta: meta),
+        const GetPromptResult(messages: [], meta: meta),
+        CompleteResult(
+          completion: CompletionResultData(values: const []),
+          meta: meta,
+        ),
+        const ElicitResult(action: 'accept', meta: meta),
+        const ListToolsResult(tools: [], meta: meta),
+        const CallToolResult(content: [], meta: meta),
+        task,
+        const ListTasksResult(tasks: [], meta: meta),
+        const CreateTaskResult(task: task, meta: meta),
+        const CreateMessageResult(
+          model: 'model',
+          stopReason: StopReason.endTurn,
+          role: SamplingMessageRole.assistant,
+          content: SamplingTextContent(text: 'done'),
+          meta: meta,
+        ),
+      ]) {
+        expectMeta(result);
+      }
+    });
+  });
+
+  group('ToolExecution Tests', () {
+    test('rejects invalid taskSupport while parsing wire JSON', () {
+      expect(
+        () => ToolExecution.fromJson({'taskSupport': 'sometimes'}),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('rejects invalid taskSupport while serializing wire JSON', () {
+      expect(
+        () => const ToolExecution(taskSupport: 'sometimes').toJson(),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+  });
+
   group('Capabilities Tests', () {
     test('ServerCapabilitiesCompletions serialization and deserialization', () {
       final completions =
           const ServerCapabilitiesCompletions(listChanged: true);
 
       final json = completions.toJson();
-      expect(json['listChanged'], equals(true));
+      expect(json, isEmpty);
 
-      final deserialized = ServerCapabilitiesCompletions.fromJson(json);
+      final deserialized = ServerCapabilitiesCompletions.fromJson(
+        const {'listChanged': true},
+      );
       expect(deserialized.listChanged, equals(true));
     });
 
@@ -102,12 +180,12 @@ void main() {
       expect(json['prompts']['listChanged'], equals(true));
       expect(json['resources']['subscribe'], equals(true));
       expect(json['tools']['listChanged'], equals(true));
-      expect(json['completions']['listChanged'], equals(true));
+      expect(json['completions'], isEmpty);
 
       final deserialized = ServerCapabilities.fromJson(json);
       expect(deserialized.prompts?.listChanged, equals(true));
       expect(deserialized.resources?.subscribe, equals(true));
-      expect(deserialized.completions?.listChanged, equals(true));
+      expect(deserialized.completions, isNotNull);
     });
 
     test('ServerCapabilities serialization and deserialization', () {
@@ -692,16 +770,20 @@ void main() {
     test('ElicitRequestParams serialization', () {
       final params = ElicitRequestParams(
         message: "Enter your name",
-        requestedSchema: JsonSchema.string(minLength: 1),
+        requestedSchema: JsonObject(
+          properties: {'name': JsonSchema.string(minLength: 1)},
+          required: const ['name'],
+        ),
       );
 
       final json = params.toJson();
       expect(json['message'], equals("Enter your name"));
-      expect(json['requestedSchema']['type'], equals('string'));
+      expect(json['requestedSchema']['type'], equals('object'));
+      expect(json['requestedSchema']['properties']['name']['type'], 'string');
 
       final restored = ElicitRequestParams.fromJson(json);
       expect(restored.message, equals("Enter your name"));
-      expect(restored.requestedSchema!.toJson()['type'], equals('string'));
+      expect(restored.requestedSchema!.toJson()['type'], equals('object'));
     });
 
     test('JsonRpcElicitRequest serialization and deserialization', () {
@@ -709,7 +791,12 @@ void main() {
         id: 42,
         elicitParams: ElicitRequestParams(
           message: "Choose option",
-          requestedSchema: JsonSchema.string(enumValues: ['yes', 'no']),
+          requestedSchema: JsonObject(
+            properties: {
+              'option': JsonSchema.string(enumValues: ['yes', 'no']),
+            },
+            required: const ['option'],
+          ),
         ),
       );
 
@@ -724,7 +811,7 @@ void main() {
       expect(restored.elicitParams.message, equals('Choose option'));
       expect(
         restored.elicitParams.requestedSchema!.toJson()['type'],
-        equals('string'),
+        equals('object'),
       );
     });
 
@@ -758,6 +845,29 @@ void main() {
       expect(restored.declined, equals(true));
       expect(restored.accepted, equals(false));
       expect(restored.content, isNull);
+    });
+
+    test('ElicitResult rejects invalid actions', () {
+      expect(
+        () => ElicitResult.fromJson(const {'action': 'later'}),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => const ElicitResult(action: 'later').toJson(),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('ElicitResult parses legacy URL fields but does not emit them', () {
+      final result = ElicitResult.fromJson(const {
+        'action': 'accept',
+        'url': 'https://example.com/auth',
+        'elicitationId': 'elicitation-1',
+      });
+
+      expect(result.url, equals('https://example.com/auth'));
+      expect(result.elicitationId, equals('elicitation-1'));
+      expect(result.toJson(), equals({'action': 'accept'}));
     });
   });
 

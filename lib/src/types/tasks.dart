@@ -1,4 +1,5 @@
 import '../types.dart';
+import 'json_rpc.dart';
 
 /// The current state of a task execution.
 enum TaskStatus {
@@ -64,16 +65,19 @@ class Task implements BaseResultData {
   final String? statusMessage;
 
   /// Time in milliseconds from creation before task may be deleted.
+  ///
+  /// Required by the MCP schema. A null value is serialized explicitly as
+  /// `"ttl": null` when the task has no expiry.
   final int? ttl;
 
   /// Suggested time in milliseconds between status checks.
   final int? pollInterval;
 
   /// ISO 8601 timestamp when the task was created.
-  final String? createdAt;
+  final String createdAt;
 
   /// ISO 8601 timestamp when the task status was last updated.
-  final String? lastUpdatedAt;
+  final String lastUpdatedAt;
 
   /// Optional metadata.
   @override
@@ -82,39 +86,98 @@ class Task implements BaseResultData {
   const Task({
     required this.taskId,
     required this.status,
+    required this.ttl,
+    required this.createdAt,
+    required this.lastUpdatedAt,
     this.statusMessage,
-    this.ttl,
     this.pollInterval,
-    this.createdAt,
-    this.lastUpdatedAt,
     this.meta,
   });
 
   factory Task.fromJson(Map<String, dynamic> json) {
+    final createdAt = _readRequiredTaskString(json, 'createdAt');
+    final lastUpdatedAt = _readRequiredTaskString(json, 'lastUpdatedAt');
+
     final meta = json['_meta'] as Map<String, dynamic>?;
     return Task(
-      taskId: json['taskId'] as String,
-      status: TaskStatusName.fromString(json['status'] as String),
-      statusMessage: json['statusMessage'] as String?,
-      ttl: json['ttl'] as int?,
-      pollInterval: json['pollInterval'] as int?,
-      createdAt: json['createdAt'] as String?,
-      lastUpdatedAt: json['lastUpdatedAt'] as String?,
+      taskId: _readRequiredTaskString(json, 'taskId'),
+      status: TaskStatusName.fromString(
+        _readRequiredTaskString(json, 'status'),
+      ),
+      statusMessage: _readOptionalTaskString(json, 'statusMessage'),
+      ttl: _readTaskInt(json, 'ttl', requiredField: true),
+      pollInterval: _readTaskInt(json, 'pollInterval'),
+      createdAt: createdAt,
+      lastUpdatedAt: lastUpdatedAt,
       meta: meta,
     );
   }
 
   @override
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson({bool includeMeta = true}) => {
         'taskId': taskId,
         'status': status.name,
         if (statusMessage != null) 'statusMessage': statusMessage,
         'ttl': ttl,
-        'pollInterval': pollInterval,
-        if (createdAt != null) 'createdAt': createdAt,
-        if (lastUpdatedAt != null) 'lastUpdatedAt': lastUpdatedAt,
-        if (meta != null) '_meta': meta,
+        if (pollInterval != null) 'pollInterval': pollInterval,
+        'createdAt': createdAt,
+        'lastUpdatedAt': lastUpdatedAt,
+        if (includeMeta && meta != null) '_meta': meta,
       };
+
+  /// Serializes this task where MCP expects the bare `Task` schema.
+  Map<String, dynamic> toBareJson() => toJson(includeMeta: false);
+}
+
+String _readRequiredTaskString(
+  Map<String, dynamic> json,
+  String field, {
+  String owner = 'Task',
+}) {
+  if (!json.containsKey(field)) {
+    throw FormatException('$owner.$field is required');
+  }
+  final value = json[field];
+  if (value is! String) {
+    throw FormatException('$owner.$field must be a string');
+  }
+  return value;
+}
+
+String? _readOptionalTaskString(
+  Map<String, dynamic> json,
+  String field, {
+  String owner = 'Task',
+}) {
+  if (!json.containsKey(field)) {
+    return null;
+  }
+  final value = json[field];
+  if (value == null || value is String) {
+    return value as String?;
+  }
+  throw FormatException('$owner.$field must be a string');
+}
+
+int? _readTaskInt(
+  Map<String, dynamic> json,
+  String field, {
+  bool requiredField = false,
+  String owner = 'Task',
+}) {
+  if (!json.containsKey(field)) {
+    if (requiredField) {
+      throw FormatException('$owner.$field is required');
+    }
+    return null;
+  }
+
+  final value = json[field];
+  if (value == null || value is int) {
+    return value as int?;
+  }
+
+  throw FormatException('$owner.$field must be an integer or null');
 }
 
 /// Parameters for the `tasks/list` request. Includes pagination.
@@ -144,9 +207,9 @@ class JsonRpcListTasksRequest extends JsonRpcRequest {
 
   factory JsonRpcListTasksRequest.fromJson(Map<String, dynamic> json) {
     final paramsMap = json['params'] as Map<String, dynamic>?;
-    final meta = paramsMap?['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcListTasksRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       params: paramsMap == null ? null : ListTasksRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -169,11 +232,13 @@ class ListTasksResult implements BaseResultData {
 
   factory ListTasksResult.fromJson(Map<String, dynamic> json) {
     final meta = json['_meta'] as Map<String, dynamic>?;
+    final tasks = json['tasks'];
+    if (tasks is! List) {
+      throw const FormatException('ListTasksResult.tasks is required');
+    }
     return ListTasksResult(
-      tasks: (json['tasks'] as List<dynamic>?)
-              ?.map((e) => Task.fromJson(e as Map<String, dynamic>))
-              .toList() ??
-          [],
+      tasks:
+          tasks.map((e) => Task.fromJson(e as Map<String, dynamic>)).toList(),
       nextCursor: json['nextCursor'] as String?,
       meta: meta,
     );
@@ -181,8 +246,9 @@ class ListTasksResult implements BaseResultData {
 
   @override
   Map<String, dynamic> toJson() => {
-        'tasks': tasks.map((t) => t.toJson()).toList(),
+        'tasks': tasks.map((t) => t.toBareJson()).toList(),
         if (nextCursor != null) 'nextCursor': nextCursor,
+        if (meta != null) '_meta': meta,
       };
 }
 
@@ -215,9 +281,9 @@ class JsonRpcCancelTaskRequest extends JsonRpcRequest {
     if (paramsMap == null) {
       throw const FormatException("Missing params for cancel task request");
     }
-    final meta = paramsMap['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcCancelTaskRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       cancelParams: CancelTaskRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -253,9 +319,9 @@ class JsonRpcGetTaskRequest extends JsonRpcRequest {
     if (paramsMap == null) {
       throw const FormatException("Missing params for get task request");
     }
-    final meta = paramsMap['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcGetTaskRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       getParams: GetTaskRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -291,9 +357,9 @@ class JsonRpcTaskResultRequest extends JsonRpcRequest {
     if (paramsMap == null) {
       throw const FormatException("Missing params for task result request");
     }
-    final meta = paramsMap['_meta'] as Map<String, dynamic>?;
+    final meta = extractRequestMeta(json);
     return JsonRpcTaskResultRequest(
-      id: json['id'],
+      id: parseRequestId(json['id']),
       resultParams: TaskResultRequest.fromJson(paramsMap),
       meta: meta,
     );
@@ -336,7 +402,8 @@ class CreateTaskResult implements BaseResultData {
 
   @override
   Map<String, dynamic> toJson() => {
-        'task': task.toJson(),
+        'task': task.toBareJson(),
+        if (meta != null) '_meta': meta,
       };
 }
 
@@ -378,15 +445,24 @@ class TaskStatusNotification {
   final String? statusMessage;
 
   /// Time in milliseconds from creation before task may be deleted.
+  ///
+  /// Required by the MCP schema. A null value is serialized explicitly as
+  /// `"ttl": null` when the task has no expiry.
   final int? ttl;
 
   /// Suggested time in milliseconds between status checks.
   final int? pollInterval;
 
   /// ISO 8601 timestamp when the task was created.
+  ///
+  /// Required by the MCP schema and required for serialization. The constructor
+  /// keeps this nullable for source compatibility with earlier SDK versions.
   final String? createdAt;
 
   /// ISO 8601 timestamp when the task status was last updated.
+  ///
+  /// Required by the MCP schema and required for serialization. The constructor
+  /// keeps this nullable for source compatibility with earlier SDK versions.
   final String? lastUpdatedAt;
 
   const TaskStatusNotification({
@@ -401,13 +477,44 @@ class TaskStatusNotification {
 
   factory TaskStatusNotification.fromJson(Map<String, dynamic> json) {
     return TaskStatusNotification(
-      taskId: json['taskId'] as String,
-      status: TaskStatusName.fromString(json['status'] as String),
-      statusMessage: json['statusMessage'] as String?,
-      ttl: json['ttl'] as int?,
-      pollInterval: json['pollInterval'] as int?,
-      createdAt: json['createdAt'] as String?,
-      lastUpdatedAt: json['lastUpdatedAt'] as String?,
+      taskId: _readRequiredTaskString(
+        json,
+        'taskId',
+        owner: 'TaskStatusNotification',
+      ),
+      status: TaskStatusName.fromString(
+        _readRequiredTaskString(
+          json,
+          'status',
+          owner: 'TaskStatusNotification',
+        ),
+      ),
+      statusMessage: _readOptionalTaskString(
+        json,
+        'statusMessage',
+        owner: 'TaskStatusNotification',
+      ),
+      ttl: _readTaskInt(
+        json,
+        'ttl',
+        requiredField: true,
+        owner: 'TaskStatusNotification',
+      ),
+      pollInterval: _readTaskInt(
+        json,
+        'pollInterval',
+        owner: 'TaskStatusNotification',
+      ),
+      createdAt: _readRequiredTaskString(
+        json,
+        'createdAt',
+        owner: 'TaskStatusNotification',
+      ),
+      lastUpdatedAt: _readRequiredTaskString(
+        json,
+        'lastUpdatedAt',
+        owner: 'TaskStatusNotification',
+      ),
     );
   }
 
@@ -415,11 +522,24 @@ class TaskStatusNotification {
         'taskId': taskId,
         'status': status.name,
         if (statusMessage != null) 'statusMessage': statusMessage,
-        if (ttl != null) 'ttl': ttl,
+        'ttl': ttl,
         if (pollInterval != null) 'pollInterval': pollInterval,
-        if (createdAt != null) 'createdAt': createdAt,
-        if (lastUpdatedAt != null) 'lastUpdatedAt': lastUpdatedAt,
+        'createdAt': _requireTaskStatusNotificationString(
+          createdAt,
+          'createdAt',
+        ),
+        'lastUpdatedAt': _requireTaskStatusNotificationString(
+          lastUpdatedAt,
+          'lastUpdatedAt',
+        ),
       };
+}
+
+String _requireTaskStatusNotificationString(String? value, String field) {
+  if (value == null) {
+    throw StateError('TaskStatusNotification.$field is required');
+  }
+  return value;
 }
 
 /// Notification from receiver indicating a task status has changed.
